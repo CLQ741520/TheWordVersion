@@ -31,8 +31,9 @@ export async function recognizeImage(imageBase64: string): Promise<OcrResult> {
     throw new Error("OCR 未返回结果");
   }
 
-  if (data.error_code !== 0) {
-    throw new Error(`OCR 识别出错：${data.error_msg}`);
+  // 百度 OCR 正常响应不含 error_code；仅在其存在且非 0 时才视为错误
+  if (data.error_code) {
+    throw new Error(`OCR 识别出错（${data.error_code}）：${data.error_msg}`);
   }
 
   return data;
