@@ -21,6 +21,20 @@ interface DictionaryEntry {
 const TRANSLATION_API =
   "https://app-cui721lyjt35-api-e94GZ5j0PWpa-gateway.appmiaoda.com/rpc/2.0/mt/texttrans/v1";
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Max-Age": "86400",
+};
+
+function jsonResponse(body: string, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders },
+  });
+}
+
 function normalizeWord(input: string): string {
   return input
     .replace(/[^a-zA-Z'-]/g, "")
@@ -113,8 +127,15 @@ async function fetchPhonetic(word: string): Promise<string> {
 }
 
 serve(async (req: Request): Promise<Response> => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
   if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: { "Content-Type": "text/plain", ...corsHeaders },
+    });
   }
 
   let rawWords: unknown;
@@ -125,18 +146,12 @@ serve(async (req: Request): Promise<Response> => {
       throw new Error("Missing or invalid words");
     }
   } catch {
-    return new Response(JSON.stringify({ error: "Invalid request body" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ error: "Invalid request body" }), 400);
   }
 
   const apiKey = Deno.env.get("INTEGRATIONS_API_KEY");
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "Server configuration error" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ error: "Server configuration error" }), 500);
   }
 
   const words = (rawWords as string[])
@@ -144,10 +159,7 @@ serve(async (req: Request): Promise<Response> => {
     .filter((w) => w.length > 0);
 
   if (words.length === 0) {
-    return new Response(JSON.stringify({ result: [] }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ result: [] }), 200);
   }
 
   try {
@@ -160,15 +172,9 @@ serve(async (req: Request): Promise<Response> => {
       translation: translationMap[word] ?? "",
     }));
 
-    return new Response(JSON.stringify({ result }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ result }), 200);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return new Response(JSON.stringify({ error: message }), {
-      status: 502,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ error: message }), 502);
   }
 });

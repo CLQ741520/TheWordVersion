@@ -16,9 +16,30 @@ interface OcrResult {
   error_msg: string;
 }
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Max-Age": "86400",
+};
+
+function jsonResponse(body: string, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders },
+  });
+}
+
 serve(async (req: Request): Promise<Response> => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
   if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: { "Content-Type": "text/plain", ...corsHeaders },
+    });
   }
 
   let image: string;
@@ -29,18 +50,12 @@ serve(async (req: Request): Promise<Response> => {
     if (!image) throw new Error("Missing image");
     languageType = body.language_type;
   } catch {
-    return new Response(JSON.stringify({ error: "Invalid request body" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ error: "Invalid request body" }), 400);
   }
 
   const apiKey = Deno.env.get("INTEGRATIONS_API_KEY");
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "Server configuration error" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(JSON.stringify({ error: "Server configuration error" }), 500);
   }
 
   const params: Record<string, string> = { image };
@@ -60,22 +75,16 @@ serve(async (req: Request): Promise<Response> => {
 
   if (upstream.status === 429 || upstream.status === 402) {
     const errText = await upstream.text();
-    return new Response(errText, {
-      status: upstream.status,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonResponse(errText, upstream.status);
   }
 
   if (!upstream.ok) {
-    return new Response(
+    return jsonResponse(
       JSON.stringify({ error: `Upstream error: ${upstream.status}` }),
-      { status: 502, headers: { "Content-Type": "application/json" } }
+      502
     );
   }
 
   const data = (await upstream.json()) as OcrResult;
-  return new Response(JSON.stringify(data), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+  return jsonResponse(JSON.stringify(data), 200);
 });
