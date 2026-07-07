@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
 import { FileImage, Loader2, Trash2, Upload, FileDown, ScanLine } from "lucide-react";
 import { toast } from "sonner";
 
@@ -19,6 +19,7 @@ import { extractEnglishWords } from "@/utils/extractWords";
 import { exportWordInfoToCsv } from "@/utils/exportCsv";
 import { recognizeImage } from "@/services/ocrService";
 import { fetchWordInfo, type WordInfo } from "@/services/wordInfoService";
+import { DEMO_IMAGE_BASE64 } from "@/utils/demoImage";
 
 interface PreviewFile {
   id: string;
@@ -30,6 +31,7 @@ export const WordOcrPage: React.FC = () => {
   const [files, setFiles] = useState<PreviewFile[]>([]);
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [results, setResults] = useState<WordInfo[]>([]);
+  const [rawTexts, setRawTexts] = useState<string[]>([]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newFiles: PreviewFile[] = [];
@@ -45,11 +47,21 @@ export const WordOcrPage: React.FC = () => {
         preview: URL.createObjectURL(file),
       });
     }
-    setFiles((prev) => [...prev, ...newFiles]);
+    if (newFiles.length > 0) {
+      setFiles((prev) => [...prev, ...newFiles]);
+    }
   }, []);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const onDropRejected = useCallback((fileRejections: FileRejection[]) => {
+    for (const rejection of fileRejections) {
+      const errors = rejection.errors.map((e) => e.message).join("；");
+      toast.error(`文件「${rejection.file.name}」被拒绝：${errors}`);
+    }
+  }, []);
+
+  const { getRootProps, getInputProps, isDragActive, fileRejections } = useDropzone({
     onDrop,
+    onDropRejected,
     accept: {
       "image/*": [".jpeg", ".jpg", ".png", ".bmp", ".webp"],
     },
@@ -72,31 +84,41 @@ export const WordOcrPage: React.FC = () => {
 
     setIsRecognizing(true);
     setResults([]);
+    setRawTexts([]);
     const toastId = toast.loading("正在识别图片中的单词，请稍候…");
 
     const allWords: string[] = [];
+    const allRawTexts: string[] = [];
     let failedCount = 0;
 
     try {
       for (const item of files) {
         try {
+          console.log(`[OCR] 开始处理图片: ${item.file.name}`);
           const base64 = await fileToBase64(item.file);
+          console.log(`[OCR] 图片转 Base64 完成, 长度: ${base64.length}`);
           const ocrResult = await recognizeImage(base64);
+          console.log(`[OCR] 识别结果:`, ocrResult);
           const texts = ocrResult.words_result.map((w) => w.words);
+          allRawTexts.push(...texts);
           const words = extractEnglishWords(texts);
+          console.log(`[OCR] 提取单词 [${item.file.name}]:`, words);
           allWords.push(...words);
         } catch (itemErr) {
           failedCount++;
+          console.error(`[OCR] 图片「${item.file.name}」处理异常:`, itemErr);
           const itemMessage = itemErr instanceof Error ? itemErr.message : "未知错误";
           toast.error(`图片「${item.file.name}」识别失败：${itemMessage}`);
         }
       }
 
+      setRawTexts(allRawTexts);
+
       if (allWords.length === 0) {
         if (failedCount > 0) {
           toast.error("所有图片均识别失败，请检查图片内容或网络后重试", { id: toastId });
         } else {
-          toast.success("未识别到任何英文单词", { id: toastId });
+          toast.success("图片中未识别到任何英文单词，请确认图片包含英语内容", { id: toastId });
         }
         return;
       }
@@ -108,16 +130,50 @@ export const WordOcrPage: React.FC = () => {
       }
 
       const wordInfos = await fetchWordInfo(allWords);
+      console.log(`[OCR] 单词信息查询完成:`, wordInfos);
 
       setResults(wordInfos);
       toast.success(`成功识别并查询 ${wordInfos.length} 个单词`, { id: toastId });
     } catch (err) {
+      console.error("[OCR] 整体流程异常:", err);
       const message = err instanceof Error ? err.message : "识别过程出现未知错误";
       toast.error(message, { id: toastId });
     } finally {
       setIsRecognizing(false);
     }
   }, [files]);
+
+  const handleDemoTest = useCallback(async () => {
+    setIsRecognizing(true);
+    setResults([]);
+    setRawTexts([]);
+    const toastId = toast.loading("正在使用示例图片测试 OCR 链路…");
+
+    try {
+      const ocrResult = await recognizeImage(DEMO_IMAGE_BASE64);
+      console.log("[OCR] 示例测试识别结果:", ocrResult);
+      const texts = ocrResult.words_result.map((w) => w.words);
+      setRawTexts(texts);
+      const words = extractEnglishWords(texts);
+      console.log("[OCR] 示例提取单词:", words);
+
+      if (words.length === 0) {
+        toast.success("示例图片未提取到英文单词，但 OCR 识别正常", { id: toastId });
+        return;
+      }
+
+      toast.loading(`示例已识别 ${words.length} 个单词，正在查询释义…`, { id: toastId });
+      const wordInfos = await fetchWordInfo(words);
+      setResults(wordInfos);
+      toast.success(`示例测试成功：共 ${wordInfos.length} 个单词`, { id: toastId });
+    } catch (err) {
+      console.error("[OCR] 示例测试异常:", err);
+      const message = err instanceof Error ? err.message : "示例测试失败";
+      toast.error(message, { id: toastId });
+    } finally {
+      setIsRecognizing(false);
+    }
+  }, []);
 
   const handleExport = useCallback(() => {
     if (results.length === 0) {
@@ -214,6 +270,16 @@ export const WordOcrPage: React.FC = () => {
               </Button>
 
               <Button
+                variant="outline"
+                onClick={handleDemoTest}
+                disabled={isRecognizing}
+                className="w-full md:w-auto"
+              >
+                <FileImage className="mr-2 h-4 w-4" />
+                使用示例测试
+              </Button>
+
+              <Button
                 variant="secondary"
                 onClick={handleExport}
                 disabled={!hasResults || isRecognizing}
@@ -226,23 +292,40 @@ export const WordOcrPage: React.FC = () => {
           </CardContent>
         </Card>
 
-        {hasResults && (
-          <section className="mt-8 md:mt-12">
-            <h2 className="mb-4 text-lg font-medium tracking-tight">识别结果</h2>
-            <Card className="border border-border bg-card overflow-hidden">
-              <div className="w-full overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="whitespace-nowrap">单词</TableHead>
-                      <TableHead className="whitespace-nowrap">音标</TableHead>
-                      <TableHead className="whitespace-nowrap">中译</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>{tableRows}</TableBody>
-                </Table>
+        {(hasResults || rawTexts.length > 0) && (
+          <section className="mt-8 md:mt-12 space-y-6">
+            {rawTexts.length > 0 && (
+              <div>
+                <h2 className="mb-2 text-lg font-medium tracking-tight">原始识别文本</h2>
+                <Card className="border border-border bg-card p-4">
+                  <ul className="space-y-1 text-sm text-muted-foreground">
+                    {rawTexts.map((t, i) => (
+                      <li key={i} className="break-words">• {t}</li>
+                    ))}
+                  </ul>
+                </Card>
               </div>
-            </Card>
+            )}
+
+            {hasResults && (
+              <div>
+                <h2 className="mb-4 text-lg font-medium tracking-tight">单词表格</h2>
+                <Card className="border border-border bg-card overflow-hidden">
+                  <div className="w-full overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="whitespace-nowrap">单词</TableHead>
+                          <TableHead className="whitespace-nowrap">音标</TableHead>
+                          <TableHead className="whitespace-nowrap">中译</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>{tableRows}</TableBody>
+                    </Table>
+                  </div>
+                </Card>
+              </div>
+            )}
           </section>
         )}
 

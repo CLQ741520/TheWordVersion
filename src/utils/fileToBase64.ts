@@ -2,10 +2,13 @@ import { compressImage } from "./compressImage";
 
 /**
  * 将 File 对象转换为纯 Base64 字符串（不含 data URL 前缀）。
- * 先对图片进行等比压缩，再采用分块读取，避免大图片触发 RangeError 或请求体超限。
+ * 先对图片进行等比压缩以减小请求体积；压缩失败直接抛出异常，避免
+ * 将不支持的格式（如 iOS HEIC）直接传给后端导致报错。
+ * 采用分块读取，避免大图片触发 RangeError 或请求体超限。
  */
 export async function fileToBase64(file: File): Promise<string> {
   const compressed = await compressImage(file);
+
   const buffer = await compressed.arrayBuffer();
   const bytes = new Uint8Array(buffer);
   const chunkSize = 8192;
