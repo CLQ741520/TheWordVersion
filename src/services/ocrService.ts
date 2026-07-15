@@ -1,4 +1,4 @@
-import { supabase } from "@/db/supabase";
+import axios from 'axios';
 
 export interface OcrWord {
   words: string;
@@ -10,31 +10,18 @@ export interface OcrResult {
   direction?: number;
   words_result_num: number;
   words_result: OcrWord[];
-  error_code: number;
-  error_msg: string;
+  error_code?: number;
+  error_msg?: string;
 }
 
-/**
- * 调用 Edge Function 进行高精度 OCR 识别。
- */
 export async function recognizeImage(imageBase64: string): Promise<OcrResult> {
-  const { data, error } = await supabase.functions.invoke<OcrResult>("accurate-ocr", {
-    body: { image: imageBase64, language_type: "CHN_ENG" },
-  });
-
-  if (error) {
-    const errorMsg = await error.context?.text();
-    throw new Error(errorMsg || error.message || "OCR 识别失败");
+  const response = await axios.post('/api/ocr', { imageBase64 });
+  
+  const data = response.data;
+  
+  if (data.error) {
+    throw new Error(data.error);
   }
-
-  if (!data) {
-    throw new Error("OCR 未返回结果");
-  }
-
-  // 百度 OCR 正常响应不含 error_code；仅在其存在且非 0 时才视为错误
-  if (data.error_code) {
-    throw new Error(`OCR 识别出错（${data.error_code}）：${data.error_msg}`);
-  }
-
+  
   return data;
 }

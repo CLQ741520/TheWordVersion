@@ -15,8 +15,8 @@ import {
 } from "@/components/ui/table";
 
 import { fileToBase64, validateImage } from "@/utils/fileToBase64";
-import { extractEnglishWords } from "@/utils/extractWords";
-import { exportWordInfoToCsv } from "@/utils/exportCsv";
+import { extractEnglishWords, type ExtractedWord } from "@/utils/extractWords";
+import { exportWordInfoToXlsx } from "@/utils/exportXlsx";
 import { recognizeImage } from "@/services/ocrService";
 import { fetchWordInfo, type WordInfo } from "@/services/wordInfoService";
 
@@ -84,7 +84,7 @@ export const WordOcrPage: React.FC = () => {
     setResults([]);
     const toastId = toast.loading("正在识别图片中的单词，请稍候…");
 
-    const allWords: string[] = [];
+    const allWords: ExtractedWord[] = [];
     let failedCount = 0;
 
     try {
@@ -114,12 +114,13 @@ export const WordOcrPage: React.FC = () => {
       if (failedCount > 0) {
         toast.warning(`${failedCount} 张图片识别失败，已跳过`, { id: toastId });
       } else {
-        toast.loading(`已识别 ${allWords.length} 个单词，正在查询释义…`, { id: toastId });
+        toast.loading(`已识别 ${allWords.length} 个单词和词组，正在查询释义…`, { id: toastId });
       }
 
-      const wordInfos = await fetchWordInfo(allWords);
+      const wordTexts = allWords.map(w => w.text);
+      const wordInfos = await fetchWordInfo(wordTexts);
       setResults(wordInfos);
-      toast.success(`成功识别并查询 ${wordInfos.length} 个单词`, { id: toastId });
+      toast.success(`成功识别并查询 ${wordInfos.length} 个单词和词组`, { id: toastId });
     } catch (err) {
       const message = err instanceof Error ? err.message : "识别过程出现未知错误";
       toast.error(message, { id: toastId });
@@ -133,7 +134,7 @@ export const WordOcrPage: React.FC = () => {
       toast.error("暂无可导出的识别结果");
       return;
     }
-    exportWordInfoToCsv(results);
+    exportWordInfoToXlsx(results);
     toast.success("表格已导出");
   }, [results]);
 
@@ -159,7 +160,7 @@ export const WordOcrPage: React.FC = () => {
             单词图片识别工具
           </h1>
           <p className="mt-2 text-sm text-muted-foreground md:text-base max-w-prose">
-            上传包含英语单词的图片，自动识别内容并生成「单词 / 音标 / 中译」表格。
+            上传包含英语单词的图片，自动识别内容并生成「单词 / 音标 / 中译」表格，支持识别词组。
           </p>
         </header>
 
@@ -243,7 +244,7 @@ export const WordOcrPage: React.FC = () => {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="whitespace-nowrap">单词</TableHead>
+                      <TableHead className="whitespace-nowrap">单词/词组</TableHead>
                       <TableHead className="whitespace-nowrap">音标</TableHead>
                       <TableHead className="whitespace-nowrap">中译</TableHead>
                     </TableRow>

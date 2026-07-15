@@ -1,0 +1,38 @@
+-- 创建数据库
+CREATE DATABASE IF NOT EXISTS Word_App DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE Word_App;
+
+-- 创建单词信息表
+CREATE TABLE IF NOT EXISTS word_info (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    word VARCHAR(100) NOT NULL UNIQUE COMMENT '英文单词',
+    phonetic VARCHAR(100) DEFAULT '' COMMENT '音标',
+    translation TEXT COMMENT '中文翻译',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_word (word)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='单词信息表';
+
+-- 创建识别记录表
+CREATE TABLE IF NOT EXISTS recognition_record (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    image_name VARCHAR(255) NOT NULL COMMENT '图片文件名',
+    image_size INT DEFAULT 0 COMMENT '图片大小(字节)',
+    recognized_words TEXT COMMENT '识别出的单词列表(JSON格式)',
+    status ENUM('success', 'failed', 'partial') DEFAULT 'success' COMMENT '识别状态',
+    error_message TEXT COMMENT '错误信息',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX idx_status (status),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='识别记录表';
+
+-- 创建单词识别关联表
+CREATE TABLE IF NOT EXISTS word_recognition (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    record_id INT NOT NULL COMMENT '识别记录ID',
+    word VARCHAR(100) NOT NULL COMMENT '单词',
+    FOREIGN KEY (record_id) REFERENCES recognition_record(id) ON DELETE CASCADE,
+    INDEX idx_record_id (record_id),
+    INDEX idx_word (word)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='单词识别关联表';

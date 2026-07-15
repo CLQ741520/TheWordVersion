@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+.env
 dist-ssr
 output
 *.local
@@ -32,3 +33,4 @@ history/*.json
 .vite_cache
 /.skills
 /tasks
+.rules
