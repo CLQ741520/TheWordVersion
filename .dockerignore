@@ -1,0 +1,7 @@
+node_modules
+.git
+.env
+*.md
+.DS_Store
+操作手册.docx
+generate_manual.py
