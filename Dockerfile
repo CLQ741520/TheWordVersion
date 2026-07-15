@@ -1,30 +1,22 @@
-# ===== 构建阶段 =====
-FROM node:20-alpine AS builder
+FROM node:20-slim
 
 WORKDIR /app
 
-# 先安装依赖（利用 Docker 缓存）
+# 复制依赖文件
 COPY package.json package-lock.json ./
-RUN npm ci
 
-# 复制源码并构建
+# 安装所有依赖（包括开发依赖，因为需要 tsx 运行服务端）
+RUN npm install
+
+# 复制所有源码
 COPY . .
+
+# 构建前端
 RUN npm run build
 
-# ===== 运行阶段 =====
-FROM node:20-alpine
-
-WORKDIR /app
-
-# 从构建阶段复制产物
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server ./server
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/node_modules ./node_modules
-
-# 生产环境标志
-ENV NODE_ENV=production
-
+# 端口
 EXPOSE 3001
 
-CMD ["npm", "start"]
+# 启动服务
+ENV NODE_ENV=production
+CMD node --import tsx server/server.ts
