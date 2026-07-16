@@ -34,3 +34,6 @@ history/*.json
 /.skills
 /tasks
 .rules
+
+# SQLite 数据库文件
+data/*.db

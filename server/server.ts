@@ -192,149 +192,231 @@ app.post('/api/ocr', async (req, res) => {
   }
 });
 
-/**
- * 从 Free Dictionary API 获取音标
- * https://api.dictionaryapi.dev/api/v2/entries/en/<word>
- */
-async function fetchPhonetic(word: string): Promise<string> {
-  try {
-    const response = await axios.get(
-      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`,
-      { timeout: 8000 }
-    );
+// ── 通用请求配置 ──
+const REQUEST_TIMEOUT = 12000;
+const MAX_RETRIES = 1;
 
+/** 带重试的 HTTP GET（指数退避） */
+async function fetchWithRetry(url: string, options: any = {}, retries = MAX_RETRIES): Promise<any> {
+  const opts = { timeout: REQUEST_TIMEOUT, ...options };
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 0) {
+        await new Promise(r => setTimeout(r, 300 * Math.pow(2, attempt - 1)));
+      }
+      return await axios.get(url, opts);
+    } catch (err: any) {
+      lastErr = err;
+      if (err.response?.status === 404 || err.response?.status === 400) throw err;
+    }
+  }
+  throw lastErr ?? new Error('max retries exceeded');
+}
+
+// ── 音标工具函数 ──
+
+/** IPA 音标合法字符集（允许 /、[]、重音、次重音、连字符等） */
+const IPA_PATTERN = /^[\/\[\]]?[a-zɑæɒɔəɛɜɪʊʌɡŋʃʒðθʤʧˌˈː\.\- ]+[\/\[\]]?$/i;
+
+/** 清洗音标格式：统一用 / / 包裹，去除 [] 和多余空格 */
+function normalizePhonetic(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let cleaned = raw.trim();
+  // 去掉首尾的方括号或斜杠，再统一加 /
+  cleaned = cleaned.replace(/^[\[\/]+|[\]\/]+$/g, '').trim();
+  cleaned = cleaned.replace(/\s+/g, ' ');
+  if (!cleaned) return '';
+  return `/${cleaned}/`;
+}
+
+/** 校验音标是否合法 IPA */
+function isValidPhonetic(raw: string): boolean {
+  if (!raw || typeof raw !== 'string') return false;
+  const stripped = raw.replace(/^[\[\/]+|[\]\/]+$/g, '').trim();
+  if (stripped.length < 2) return false;
+  // 必须包含至少一个 IPA 特征字符（含普通字母）
+  if (!IPA_PATTERN.test(raw)) return false;
+  // 如果全是普通字母没有 IPA 特殊符号，至少长度够长才接受
+  if (/^[a-zA-Z\s]+$/.test(stripped) && stripped.length < 4) return false;
+  return true;
+}
+
+// ── 音标数据源 ──
+
+/**
+ * 从 Free Dictionary API 获取音标（优先英式）
+ */
+async function fetchPhoneticFromFreeDict(word: string): Promise<{ phonetic: string; source: string }> {
+  try {
+    const response = await fetchWithRetry(
+      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`
+    );
     const data = response.data;
-    if (!Array.isArray(data) || data.length === 0) return '';
+    if (!Array.isArray(data) || data.length === 0) return { phonetic: '', source: '' };
 
     const entry = data[0];
+    // 优先取 phonetics 中 audio 包含 'uk' 的英式音标
+    if (entry.phonetics?.length > 0) {
+      const ukPhonetic = entry.phonetics.find((p: any) =>
+        p.audio && typeof p.audio === 'string' && p.audio.includes('-uk') && p.text
+      );
+      if (ukPhonetic?.text) return { phonetic: normalizePhonetic(ukPhonetic.text), source: 'FreeDict(UK)' };
 
-    if (entry.phonetic) return entry.phonetic;
-
-    if (entry.phonetics && entry.phonetics.length > 0) {
-      for (const p of entry.phonetics) {
-        if (p.text) return p.text;
-      }
+      const anyPhonetic = entry.phonetics.find((p: any) => p.text);
+      if (anyPhonetic?.text) return { phonetic: normalizePhonetic(anyPhonetic.text), source: 'FreeDict' };
     }
 
-    return '';
-  } catch (error) {
-    console.error(`FreeDict phonetic error for ${word}:`, error);
-    return '';
+    if (entry.phonetic) return { phonetic: normalizePhonetic(entry.phonetic), source: 'FreeDict' };
+    return { phonetic: '', source: '' };
+  } catch {
+    return { phonetic: '', source: '' };
   }
 }
 
-/**
- * 从有道词典获取音标和中译（后备来源，覆盖 Free Dictionary API 没有的生僻词）
- * https://dict.youdao.com/jsonapi
- */
-async function fetchFromYoudao(word: string): Promise<{ phonetic: string; translation: string }> {
-  try {
-    const response = await axios.get('https://dict.youdao.com/jsonapi', {
-      params: {
-        jsonversion: 2,
-        client: 'mobile',
-        q: word,
-      },
-      timeout: 8000,
-    });
+// 有道 trs 深度遍历（同之前）
+function extractTrsTexts(trs: any[]): string[] {
+  const results: string[] = [];
+  const seen = new Set<string>();
 
+  function walk(node: any) {
+    if (!node || results.length >= 5) return;
+    if (typeof node === 'string' && /[\u4e00-\u9fa5]/.test(node)) {
+      const clean = node.replace(/\s+/g, ' ').trim();
+      if (clean && !seen.has(clean)) { seen.add(clean); results.push(clean); }
+      return;
+    }
+    if (Array.isArray(node)) { for (const item of node) walk(item); }
+    else if (typeof node === 'object') {
+      if (node.l) walk(node.l);
+      if (node.i) walk(node.i);
+      if (node.tr) walk(node.tr);
+    }
+  }
+  walk(trs);
+  return results.slice(0, 5);
+}
+
+/**
+ * 从有道词典获取音标和中译
+ */
+async function fetchFromYoudao(word: string): Promise<{ phonetic: string; translation: string; source: string }> {
+  try {
+    const response = await fetchWithRetry('https://dict.youdao.com/jsonapi', {
+      params: { jsonversion: 2, client: 'mobile', q: word },
+    });
     const data = response.data;
     let phonetic = '';
     let translation = '';
 
-    // 音标：优先英式，没有则用美式
+    // 音标：优先英式 → 美式
     if (data.symbol) {
-      if (data.symbol.ph_en) phonetic = data.symbol.ph_en;
-      else if (data.symbol.ph_am) phonetic = data.symbol.ph_am;
+      if (data.symbol.ph_en) phonetic = normalizePhonetic(data.symbol.ph_en);
+      else if (data.symbol.ph_am) phonetic = normalizePhonetic(data.symbol.ph_am);
     }
 
-    // 中译：从 ec（英中词典）结果中提取
+    // 中译
     if (data.ec?.word?.[0]?.trs) {
-      const trs = data.ec.word[0].trs;
-      const defs: string[] = [];
-      for (const tr of trs.slice(0, 3)) {
-        const text = tr.tr?.[0]?.l?.i?.[0];
-        if (text && typeof text === 'string') {
-          defs.push(text);
-        }
-      }
-      if (defs.length > 0) {
-        translation = defs.join('；');
-      }
+      const texts = extractTrsTexts(data.ec.word[0].trs);
+      if (texts.length > 0) translation = texts.join('；');
+    }
+    if (!translation && data.fanyi?.tran) {
+      const t = data.fanyi.tran;
+      if (typeof t === 'string' && /[\u4e00-\u9fa5]/.test(t)) translation = t;
     }
 
-    return { phonetic, translation };
-  } catch (error) {
-    console.error(`Youdao API error for ${word}:`, error);
-    return { phonetic: '', translation: '' };
+    return { phonetic, translation, source: phonetic ? 'Youdao' : '' };
+  } catch {
+    return { phonetic: '', translation: '', source: '' };
   }
 }
 
 /**
- * 获取音标（多源兜底）：Free Dictionary API → 有道词典
+ * 从剑桥词典获取音标（HTML 爬取）
  */
-async function fetchPhoneticWithFallback(word: string): Promise<string> {
-  const phonetic = await fetchPhonetic(word);
-  if (phonetic) return phonetic;
-
-  const youdaoResult = await fetchFromYoudao(word);
-  return youdaoResult.phonetic || '';
+async function fetchPhoneticFromCambridge(word: string): Promise<{ phonetic: string; source: string }> {
+  try {
+    const response = await fetchWithRetry(
+      `https://dictionary.cambridge.org/dictionary/english/${encodeURIComponent(word)}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } }
+    );
+    const html = typeof response.data === 'string' ? response.data : '';
+    // 英式音标 class: ipa dipa lpr-2 lpl-1, 美式: ipa dipa lpr-1 lpl-1
+    const ukMatch = html.match(/<span class="[^"]*ipa[^"]*lpr-2[^"]*">([^<]+)<\/span>/);
+    const usMatch = html.match(/<span class="[^"]*ipa[^"]*lpr-1[^"]*">([^<]+)<\/span>/);
+    const anyMatch = html.match(/<span class="[^"]*ipa[^"]*">([^<]+)<\/span>/);
+    const raw = ukMatch?.[1] || usMatch?.[1] || anyMatch?.[1] || '';
+    if (raw) return { phonetic: normalizePhonetic(raw), source: 'Cambridge' };
+    return { phonetic: '', source: '' };
+  } catch {
+    return { phonetic: '', source: '' };
+  }
 }
 
+// ── 音标获取：并行竞速 + 英式优先 ──
+
 /**
- * 获取中译（多源兜底）：百度翻译 → 有道词典
+ * 并行请求 FreeDict / 有道 / 剑桥，取第一个合法结果。
+ * 英式音标优先，非英式也接受但降级标记。
  */
-async function fetchTranslation(word: string): Promise<string> {
-  // 百度翻译
-  const baiduResult = await translateWithBaidu(word);
-  if (baiduResult.translation && /[一-龥]/.test(baiduResult.translation)) {
-    return baiduResult.translation;
+async function fetchPhoneticParallel(word: string): Promise<{ phonetic: string; source: string }> {
+  // 并行启动三个源
+  const freeDictP = fetchPhoneticFromFreeDict(word);
+  const youdaoP = fetchFromYoudao(word).then(r => ({ phonetic: r.phonetic, source: r.source }));
+  const cambridgeP = fetchPhoneticFromCambridge(word);
+
+  // 按可靠性排序收集
+  const results = await Promise.allSettled([freeDictP, youdaoP, cambridgeP]);
+  const valid: { phonetic: string; source: string }[] = [];
+
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value.phonetic && isValidPhonetic(r.value.phonetic)) {
+      valid.push(r.value);
+    }
   }
 
-  // 有道词典（后备）
-  const youdaoResult = await fetchFromYoudao(word);
-  if (youdaoResult.translation && /[一-龥]/.test(youdaoResult.translation)) {
-    return youdaoResult.translation;
-  }
+  if (valid.length === 0) return { phonetic: '', source: '' };
 
-  return '';
+  // 优先选英式来源
+  const ukPreferred = valid.find(v => v.source.includes('UK') || v.source === 'Cambridge');
+  if (ukPreferred) return ukPreferred;
+
+  return valid[0];
 }
 
-/**
- * 从百度翻译获取中文翻译
- */
-async function translateWithBaidu(word: string): Promise<{ phonetic: string; translation: string }> {
+// ── 中译 ──
+
+async function translateWithBaidu(word: string): Promise<string> {
   try {
     const accessToken = await getBaiduAccessToken();
-
     const response = await axios.post(
       'https://aip.baidubce.com/rpc/2.0/mt/texttrans/v1',
-      {
-        q: word,
-        from: 'en',
-        to: 'zh',
-      },
-      {
-        params: {
-          access_token: accessToken,
-        },
-        timeout: 8000,
-      }
+      { q: word, from: 'en', to: 'zh' },
+      { params: { access_token: accessToken }, timeout: REQUEST_TIMEOUT }
     );
-
     const data = response.data;
-    if (data && data.result && data.result.trans_result && data.result.trans_result.length > 0) {
-      const trans = data.result.trans_result[0];
-      return {
-        phonetic: '',
-        translation: trans.dst || '',
-      };
+    if (data?.result?.trans_result?.length > 0) {
+      return data.result.trans_result[0].dst || '';
     }
-    return { phonetic: '', translation: '' };
-  } catch (error) {
-    console.error(`Baidu Translate error for ${word}:`, error);
-    return { phonetic: '', translation: '' };
+    return '';
+  } catch {
+    return '';
   }
+}
+
+function hasChinese(text: string): boolean {
+  return /[\u4e00-\u9fa5\u3000-\u303F\uFF00-\uFFEF\u3400-\u4DBF]/.test(text);
+}
+
+/** 获取中译：百度 → 有道 */
+async function fetchTranslation(word: string): Promise<string> {
+  const baiduTrans = await translateWithBaidu(word);
+  if (baiduTrans && hasChinese(baiduTrans)) return baiduTrans;
+
+  const youdaoResult = await fetchFromYoudao(word);
+  if (youdaoResult.translation && hasChinese(youdaoResult.translation)) return youdaoResult.translation;
+
+  return '';
 }
 
 const wordDictionary: Record<string, { phonetic: string; translation: string }> = {
@@ -506,7 +588,7 @@ const wordDictionary: Record<string, { phonetic: string; translation: string }> 
 async function getWordInfo(word: string): Promise<{ phonetic: string; translation: string }> {
   const lowerWord = word.toLowerCase();
 
-  // 1. \u5148\u67e5\u786c\u7f16\u7801\u8bcd\u5178\uff08\u6700\u5feb\u8def\u5f84\uff09
+  // 1. 硬编码词典（最快路径）
   if (wordDictionary[lowerWord]) {
     return wordDictionary[lowerWord];
   }
@@ -515,32 +597,43 @@ async function getWordInfo(word: string): Promise<{ phonetic: string; translatio
   let phonetic = '';
   let translation = '';
 
-  // 2. \u5e76\u884c\u83b7\u53d6\u97f3\u6807\u548c\u4e2d\u8bd1\uff08\u5747\u542b\u591a\u6e90\u515c\u5e95\uff09
+  // 2. 并行获取音标和翻译（音标三源竞速，翻译双源兜底）
   const [phoneticResult, translationResult] = await Promise.all([
-    fetchPhoneticWithFallback(word).catch(() => ''),
+    fetchPhoneticParallel(word).then(r => r.phonetic).catch(() => ''),
     fetchTranslation(word).catch(() => ''),
   ]);
 
-  if (phoneticResult) phonetic = phoneticResult;
-  if (translationResult) translation = translationResult;
+  phonetic = phoneticResult;
+  translation = translationResult;
 
-  // 3. \u77ed\u8bed\u5904\u7406\uff1a\u9010\u8bcd\u62fc\u5408\u97f3\u6807
+  // 3. 音标校验：如果返回的音标不合法，清空
+  if (phonetic && !isValidPhonetic(phonetic)) {
+    console.warn(`[PhoneticValidation] "${word}" got invalid phonetic: "${phonetic}", discarding`);
+    phonetic = '';
+  }
+
+  // 4. 词组处理：如果没有音标，逐词拼接
   if (!phonetic && isPhrase) {
-    const words = word.split(' ');
+    const words = word.split(/\s+/);
     const phonetics: string[] = [];
 
-    for (const w of words) {
+    // 对每个组成词并行查音标
+    const wordPromises = words.map(async (w) => {
       const lowerW = w.toLowerCase();
       if (wordDictionary[lowerW]) {
-        const clean = wordDictionary[lowerW].phonetic.replace(/[\/()]/g, '').trim();
-        if (clean) phonetics.push(clean);
-      } else {
-        const p = await fetchPhoneticWithFallback(w);
-        if (p) {
-          const clean = p.replace(/[\/()]/g, '').trim();
-          if (clean) phonetics.push(clean);
-        }
+        const clean = wordDictionary[lowerW].phonetic.replace(/[\/\[\]()]/g, '').trim();
+        if (clean) return clean;
       }
+      const result = await fetchPhoneticParallel(w);
+      if (result.phonetic) {
+        return result.phonetic.replace(/[\/\[\]]/g, '').trim();
+      }
+      return '';
+    });
+
+    const parts = await Promise.all(wordPromises);
+    for (const p of parts) {
+      if (p) phonetics.push(p);
     }
 
     if (phonetics.length > 0) {
@@ -548,14 +641,20 @@ async function getWordInfo(word: string): Promise<{ phonetic: string; translatio
     }
   }
 
-  // 4. \u77ed\u8bed\u7684\u4e2d\u8bd1\u540e\u5907\uff1a\u5982\u679c\u4e0a\u9762\u6ca1\u67e5\u5230\uff0c\u7528\u8bcd\u7ec4\u4e2d\u7b2c\u4e00\u4e2a\u5df2\u77e5\u5355\u8bcd\u7684\u7ffb\u8bd1
+  // 5. 词组翻译后备：用组成词中第一个已知词的解释
   if (!translation && isPhrase) {
-    for (const w of lowerWord.split(' ')) {
+    for (const w of lowerWord.split(/\s+/)) {
       if (wordDictionary[w]) {
         translation = wordDictionary[w].translation;
         break;
       }
     }
+  }
+
+  // 6. 最终校验：确保返回的是干净数据
+  if (phonetic && !isValidPhonetic(phonetic)) {
+    console.warn(`[PhoneticValidation:FINAL] "${word}" phonetic invalid: "${phonetic}"`);
+    phonetic = '';
   }
 
   return { phonetic, translation };
@@ -574,25 +673,26 @@ app.get('/api/words', async (req, res) => {
       const lowerWord = word.toLowerCase();
 
       const dbRows = dbQueryAll('SELECT phonetic, translation FROM word_info WHERE word = ?', [lowerWord]);
-
       const dbResult = dbRows[0];
 
       let phonetic = dbResult?.phonetic || '';
       let translation = dbResult?.translation || '';
 
-      if (!phonetic || (!translation || !/[\u4e00-\u9fa5]/.test(translation))) {
+      // 数据库音标也需要校验：如果存了脏数据，触发重新查询
+      const dbPhoneticValid = phonetic && isValidPhonetic(phonetic);
+      const dbTranslationValid = translation && hasChinese(translation);
+
+      if (!dbPhoneticValid || !dbTranslationValid) {
         const info = await getWordInfo(word);
 
-        if (!phonetic && info.phonetic) {
+        if (!dbPhoneticValid && info.phonetic) {
           phonetic = info.phonetic;
         }
-
-        if (!translation || !/[\u4e00-\u9fa5]/.test(translation)) {
-          if (info.translation && /[\u4e00-\u9fa5]/.test(info.translation)) {
-            translation = info.translation;
-          }
+        if (!dbTranslationValid && info.translation && hasChinese(info.translation)) {
+          translation = info.translation;
         }
 
+        // 回写数据库
         if (phonetic || translation) {
           dbRun(
             `INSERT INTO word_info (word, phonetic, translation)
