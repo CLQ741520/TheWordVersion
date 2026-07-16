@@ -1,10 +1,11 @@
 import express from 'express';
-import mysql from 'mysql2/promise';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import initSqlJs from 'sql.js';
+import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,13 +17,96 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const pool = mysql.createPool({
-  host: process.env.VITE_DB_HOST || 'localhost',
-  port: parseInt(process.env.VITE_DB_PORT || '3306'),
-  user: process.env.VITE_DB_USER || 'root',
-  password: process.env.VITE_DB_PASSWORD || '',
-  database: process.env.VITE_DB_NAME || 'Word_App',
-});
+// ── SQLite 初始化 ──
+const DB_PATH = path.resolve(__dirname, '../data/word_app.db');
+let db: any = null;
+
+async function initDatabase() {
+  const SQL = await initSqlJs();
+
+  // 确保 data 目录存在
+  const dataDir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  // 如果已有数据库文件，加载它
+  if (fs.existsSync(DB_PATH)) {
+    const buffer = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(buffer);
+  } else {
+    db = new SQL.Database();
+  }
+
+  // 建表（IF NOT EXISTS）
+  db.run(`
+    CREATE TABLE IF NOT EXISTS word_info (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      word TEXT NOT NULL UNIQUE,
+      phonetic TEXT DEFAULT '',
+      translation TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS recognition_record (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_name TEXT NOT NULL,
+      image_size INTEGER DEFAULT 0,
+      recognized_words TEXT,
+      status TEXT DEFAULT 'success',
+      error_message TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS word_recognition (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      record_id INTEGER NOT NULL,
+      word TEXT NOT NULL,
+      FOREIGN KEY (record_id) REFERENCES recognition_record(id) ON DELETE CASCADE
+    )
+  `);
+
+  saveDatabase();
+  console.log(`SQLite 数据库已就绪: ${DB_PATH}`);
+}
+
+/** 将数据库写回磁盘 */
+function saveDatabase() {
+  if (db) {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(DB_PATH, buffer);
+  }
+}
+
+/** 查询辅助：执行 SELECT 返回对象数组 */
+function dbQueryAll(sql: string, params: any[] = []): any[] {
+  const stmt = db.prepare(sql);
+  if (params.length > 0) stmt.bind(params);
+  const rows: any[] = [];
+  while (stmt.step()) {
+    rows.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return rows;
+}
+
+/** 执行辅助：INSERT / UPDATE / DELETE */
+function dbRun(sql: string, params: any[] = []) {
+  db.run(sql, params);
+  saveDatabase();
+}
+
+/** 获取最后插入的 ID */
+function dbLastInsertId(): number {
+  return db.exec("SELECT last_insert_rowid() as id")[0]?.values[0][0] ?? 0;
+}
+
+// 初始化数据库
+await initDatabase();
 
 let cachedAccessToken: string | null = null;
 let tokenExpireTime: number = 0;
@@ -370,7 +454,6 @@ const wordDictionary: Record<string, { phonetic: string; translation: string }> 
   'stand up': { phonetic: '/stænd ʌp/', translation: '站起来；起立' },
   'sit': { phonetic: '/sɪt/', translation: '坐；坐下' },
   'sit down': { phonetic: '/sɪt daʊn/', translation: '坐下' },
-  'let': { phonetic: '/let/', translation: '让；允许' },
   "let's": { phonetic: '/lets/', translation: '让我们' },
   'let us': { phonetic: '/let ʌs/', translation: '让我们' },
   'look': { phonetic: '/lʊk/', translation: '看；瞧' },
@@ -391,7 +474,6 @@ const wordDictionary: Record<string, { phonetic: string; translation: string }> 
   'take off': { phonetic: '/teɪk ɒf/', translation: '脱下；起飞' },
   'take care': { phonetic: '/teɪk keə(r)/', translation: '小心；保重' },
   'take care of': { phonetic: '/teɪk keə(r) ɒv/', translation: '照顾；照料' },
-  'give up': { phonetic: '/ɡɪv ʌp/', translation: '放弃；认输' },
   'give back': { phonetic: '/ɡɪv bæk/', translation: '归还；送回' },
   'turn on': { phonetic: '/tɜːn ɒn/', translation: '打开；开启' },
   'turn off': { phonetic: '/tɜːn ɒf/', translation: '关闭；关掉' },
@@ -489,24 +571,21 @@ app.get('/api/words', async (req, res) => {
 
     for (const word of words) {
       const lowerWord = word.toLowerCase();
-      
-      const [dbRows] = await pool.execute(
-        'SELECT phonetic, translation FROM word_info WHERE word = ?',
-        [lowerWord]
-      );
-      
-      const dbResult = (dbRows as { phonetic: string; translation: string }[])[0];
-      
+
+      const dbRows = dbQueryAll('SELECT phonetic, translation FROM word_info WHERE word = ?', [lowerWord]);
+
+      const dbResult = dbRows[0];
+
       let phonetic = dbResult?.phonetic || '';
       let translation = dbResult?.translation || '';
 
       if (!phonetic || (!translation || !/[\u4e00-\u9fa5]/.test(translation))) {
         const info = await getWordInfo(word);
-        
+
         if (!phonetic && info.phonetic) {
           phonetic = info.phonetic;
         }
-        
+
         if (!translation || !/[\u4e00-\u9fa5]/.test(translation)) {
           if (info.translation && /[\u4e00-\u9fa5]/.test(info.translation)) {
             translation = info.translation;
@@ -514,10 +593,10 @@ app.get('/api/words', async (req, res) => {
         }
 
         if (phonetic || translation) {
-          await pool.execute(
-            `INSERT INTO word_info (word, phonetic, translation) 
-             VALUES (?, ?, ?) 
-             ON DUPLICATE KEY UPDATE phonetic = VALUES(phonetic), translation = VALUES(translation)`,
+          dbRun(
+            `INSERT INTO word_info (word, phonetic, translation)
+             VALUES (?, ?, ?)
+             ON CONFLICT(word) DO UPDATE SET phonetic = excluded.phonetic, translation = excluded.translation, updated_at = datetime('now', 'localtime')`,
             [lowerWord, phonetic, translation]
           );
         }
@@ -536,16 +615,16 @@ app.get('/api/words', async (req, res) => {
 app.post('/api/words', async (req, res) => {
   try {
     const wordInfos = req.body as { word: string; phonetic: string; translation: string }[];
-    
+
     for (const wordInfo of wordInfos) {
-      await pool.execute(
-        `INSERT INTO word_info (word, phonetic, translation) 
-         VALUES (?, ?, ?) 
-         ON DUPLICATE KEY UPDATE phonetic = VALUES(phonetic), translation = VALUES(translation)`,
+      dbRun(
+        `INSERT INTO word_info (word, phonetic, translation)
+         VALUES (?, ?, ?)
+         ON CONFLICT(word) DO UPDATE SET phonetic = excluded.phonetic, translation = excluded.translation, updated_at = datetime('now', 'localtime')`,
         [wordInfo.word.toLowerCase(), wordInfo.phonetic, wordInfo.translation]
       );
     }
-    
+
     res.json({ success: true, count: wordInfos.length });
   } catch (error) {
     console.error('Error saving words:', error);
@@ -556,33 +635,19 @@ app.post('/api/words', async (req, res) => {
 app.post('/api/recognition', async (req, res) => {
   try {
     const { imageName, imageSize, words, status, errorMessage } = req.body;
-    
-    const connection = await pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      
-      const [result] = await connection.execute(
-        'INSERT INTO recognition_record (image_name, image_size, recognized_words, status, error_message) VALUES (?, ?, ?, ?, ?)',
-        [imageName, imageSize, JSON.stringify(words), status, errorMessage || '']
-      );
-      
-      const recordId = (result as any).insertId;
-      
-      for (const word of words) {
-        await connection.execute(
-          'INSERT INTO word_recognition (record_id, word) VALUES (?, ?)',
-          [recordId, word]
-        );
-      }
-      
-      await connection.commit();
-      res.json({ success: true, recordId });
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
+
+    dbRun(
+      'INSERT INTO recognition_record (image_name, image_size, recognized_words, status, error_message) VALUES (?, ?, ?, ?, ?)',
+      [imageName, imageSize, JSON.stringify(words), status, errorMessage || '']
+    );
+
+    const recordId = dbLastInsertId();
+
+    for (const word of words) {
+      dbRun('INSERT INTO word_recognition (record_id, word) VALUES (?, ?)', [recordId, word]);
     }
+
+    res.json({ success: true, recordId });
   } catch (error) {
     console.error('Error saving recognition:', error);
     res.status(500).json({ error: 'Failed to save recognition' });

@@ -15,4 +15,5 @@ RUN npx vite build
 # 启动
 EXPOSE 3001
 ENV NODE_ENV=production
+RUN mkdir -p /app/data
 CMD npm start
