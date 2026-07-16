@@ -18,7 +18,8 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 // ── SQLite 初始化 ──
-const DB_PATH = path.resolve(__dirname, '../data/word_app.db');
+// 可通过环境变量 SQLITE_DB_PATH 自定义数据库路径（如持久化卷挂载路径）
+const DB_PATH = process.env.SQLITE_DB_PATH || path.resolve(__dirname, '../data/word_app.db');
 let db: any = null;
 
 async function initDatabase() {
