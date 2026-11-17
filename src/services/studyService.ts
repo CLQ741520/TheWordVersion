@@ -20,6 +20,18 @@ function toErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/** 获取服务器北京时间日期（YYYY-MM-DD），用于每日目标修改校验 */
+export async function fetchServerDate(): Promise<string> {
+  try {
+    const response = await axios.get(`${API_BASE}/time`);
+    const date = response.data?.beijingDate;
+    if (typeof date !== "string" || !date) throw new Error("invalid response");
+    return date;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "请先检查网络是否正常！"));
+  }
+}
+
 export async function fetchReviewQueue(
   limit = 50,
   mode: ReviewQueueMode = "due"

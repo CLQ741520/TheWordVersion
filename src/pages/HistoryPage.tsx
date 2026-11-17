@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, History, Loader2, Plus, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, History, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -24,7 +24,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { fetchRecognitionDetail, fetchRecognitionRecords } from "@/services/recognitionService";
+import {
+  deleteRecognitionRecord,
+  fetchRecognitionDetail,
+  fetchRecognitionRecords,
+} from "@/services/recognitionService";
 import { addWordsToWordbook } from "@/services/wordbookService";
 import type { RecognitionDetail, RecognitionListItem } from "@/types/recognition";
 
@@ -50,6 +54,9 @@ export default function HistoryPage() {
   const [detail, setDetail] = useState<RecognitionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [adding, setAdding] = useState(false);
+
+  const [deleteTarget, setDeleteTarget] = useState<RecognitionListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -119,11 +126,31 @@ export default function HistoryPage() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await deleteRecognitionRecord(deleteTarget.id);
+      toast.success("已删除识别记录");
+      setDeleteTarget(null);
+      // 删掉当前页最后一条时回退一页，否则原地刷新
+      if (items.length === 1 && page > 1) {
+        setPage((prev) => prev - 1);
+      } else {
+        setRefreshKey((key) => key + 1);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除识别记录失败");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
-      <header className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+      <header className="mb-6 flex flex-col items-center gap-3 text-center">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">识别历史</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -145,7 +172,7 @@ export default function HistoryPage() {
             <Input
               value={q}
               onChange={(event) => setQ(event.target.value)}
-              placeholder="按图片文件名搜索…"
+              placeholder="按文件名搜索…"
               className="pl-9"
             />
           </div>
@@ -154,12 +181,12 @@ export default function HistoryPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="whitespace-nowrap">图片文件</TableHead>
+                  <TableHead className="whitespace-nowrap">文件</TableHead>
                   <TableHead className="whitespace-nowrap">大小</TableHead>
                   <TableHead className="whitespace-nowrap">单词数</TableHead>
                   <TableHead className="whitespace-nowrap">状态</TableHead>
                   <TableHead className="whitespace-nowrap">识别时间</TableHead>
-                  <TableHead className="w-28">操作</TableHead>
+                  <TableHead className="w-44">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -181,9 +208,20 @@ export default function HistoryPage() {
                       {item.created_at}
                     </TableCell>
                     <TableCell>
-                      <Button variant="outline" size="sm" onClick={() => void openDetail(item)}>
-                        查看单词
-                      </Button>
+                      <div className="flex items-center justify-center gap-1">
+                        <Button variant="outline" size="sm" onClick={() => void openDetail(item)}>
+                          查看单词
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() => setDeleteTarget(item)}
+                          aria-label={`删除 ${item.image_name || "识别记录"}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -202,7 +240,7 @@ export default function HistoryPage() {
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <History className="h-10 w-10 text-muted-foreground" />
               <p className="mt-4 text-sm text-muted-foreground">
-                {debouncedQ ? "没有符合条件的识别记录" : "还没有识别记录，去识别几张单词图片吧"}
+                {debouncedQ ? "没有符合条件的识别记录" : "还没有识别记录，去识别一些图片或文档吧"}
               </p>
               {!debouncedQ && (
                 <Button asChild variant="outline" className="mt-4">
@@ -297,6 +335,31 @@ export default function HistoryPage() {
             >
               {adding && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               全部加入生词本
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除识别记录</DialogTitle>
+            <DialogDescription>
+              确定要删除「{deleteTarget?.image_name || "未命名文件"}」这条识别记录吗？删除后无法恢复，已收录到生词本的单词不受影响。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => void handleDelete()} disabled={deleting}>
+              {deleting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              确定删除
             </Button>
           </DialogFooter>
         </DialogContent>

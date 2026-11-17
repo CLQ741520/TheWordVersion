@@ -17,6 +17,14 @@ export default {
             }
         },
         extend: {
+            fontSize: {
+                xs: ['21px', { lineHeight: '1.4' }],
+                sm: ['21px', { lineHeight: '1.4' }],
+                base: ['21px', { lineHeight: '1.4' }],
+                lg: ['21px', { lineHeight: '1.4' }],
+                xl: ['21px', { lineHeight: '1.4' }],
+                '2xl': ['21px', { lineHeight: '1.4' }]
+            },
             colors: {
                 border: 'hsl(var(--border))',
                 borderColor: {

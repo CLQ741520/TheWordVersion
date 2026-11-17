@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { BarChart3, Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ActivityHeatmap } from "@/components/ActivityHeatmap";
+import { MonthHeatmap } from "@/components/MonthHeatmap";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
-import { fetchActivity, fetchStats } from "@/services/studyService";
+import { fetchActivity, fetchServerDate, fetchStats } from "@/services/studyService";
 import type { ActivityResponse, StatsResponse } from "@/types/study";
 import { cn } from "@/lib/utils";
 
@@ -42,13 +44,23 @@ export default function StatsPage() {
   const [activity, setActivity] = useState<ActivityResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [dailyGoal, setDailyGoal] = useLocalStorage<number>("theword:daily-goal", 20);
+  // 记录每日目标最近一次修改的北京时间日期，用于「每天只能改一次」的锁定
+  const [goalLastChange, setGoalLastChange] = useLocalStorage<{
+    date: string;
+    goal: number;
+  } | null>("theword:goal-last-change", null);
+  const [networkDate, setNetworkDate] = useState("");
+  const [customGoal, setCustomGoal] = useState(() => String(dailyGoal));
+  const [goalSaving, setGoalSaving] = useState(false);
+  const [selectedYear, setSelectedYear] = useState(() => String(new Date().getFullYear()));
+  const [selectedMonth, setSelectedMonth] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [statsResult, activityResult] = await Promise.allSettled([
         fetchStats(),
-        fetchActivity(365),
+        fetchActivity(730),
       ]);
       if (statsResult.status === "rejected") throw statsResult.reason;
       setStats(statsResult.value);
@@ -65,6 +77,86 @@ export default function StatsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 进页面时取一次服务器北京时间；失败则保持空值，修改目标时会再次请求并提示
+  useEffect(() => {
+    let cancelled = false;
+    void fetchServerDate()
+      .then((date) => {
+        if (!cancelled) setNetworkDate(date);
+      })
+      .catch(() => {
+        // 网络异常时不阻塞页面展示
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const goalLocked = networkDate !== "" && goalLastChange?.date === networkDate;
+
+  /** 修改每日目标：必须联网取到北京时间，且同一北京时间日期内只能改一次 */
+  const applyGoal = async (value: number) => {
+    if (goalSaving) return;
+    const goal = Math.round(Number(value));
+    if (!Number.isFinite(goal) || goal < 1 || goal > 999) {
+      toast.error("请输入 1–999 之间的目标词数");
+      return;
+    }
+    // 目标没变化不算一次修改，不消耗当天的修改机会
+    if (goal === Math.max(1, Number(dailyGoal) || 1)) {
+      toast.info(`当前目标已经是 ${goal} 词`);
+      return;
+    }
+    setGoalSaving(true);
+    try {
+      let today: string;
+      try {
+        today = await fetchServerDate();
+      } catch {
+        toast.error("请先检查网络是否正常！");
+        return;
+      }
+      if (goalLastChange?.date === today) {
+        toast.error(`今天已经修改过目标（${goalLastChange.goal} 词），明天再调整吧`);
+        return;
+      }
+      setDailyGoal(goal);
+      setGoalLastChange({ date: today, goal });
+      setNetworkDate(today);
+      setCustomGoal(String(goal));
+      toast.success(`每日目标已设为 ${goal} 词`);
+    } finally {
+      setGoalSaving(false);
+    }
+  };
+
+  const years = useMemo(() => {
+    const set = new Set((activity?.days ?? []).map((day) => day.date.slice(0, 4)));
+    return [...set].sort().reverse().slice(0, 2);
+  }, [activity]);
+
+  useEffect(() => {
+    if (years.length > 0 && !years.includes(selectedYear)) {
+      setSelectedYear(years[0]);
+      setSelectedMonth("");
+    }
+  }, [years, selectedYear]);
+
+  const yearDays = useMemo(
+    () => (activity?.days ?? []).filter((day) => day.date.startsWith(`${selectedYear}-`)),
+    [activity, selectedYear]
+  );
+
+  const monthDays = useMemo(
+    () => yearDays.filter((day) => day.date.startsWith(`${selectedYear}-${selectedMonth}`)),
+    [yearDays, selectedYear, selectedMonth]
+  );
+
+  const viewDays = selectedMonth ? monthDays : yearDays;
+  const viewTotal = viewDays.reduce((sum, day) => sum + day.count, 0);
+  const viewActiveDays = viewDays.filter((day) => day.count > 0).length;
+  const viewMaxCount = Math.max(...viewDays.map((day) => day.count), 1);
 
   if (loading) {
     return (
@@ -98,9 +190,6 @@ export default function StatsPage() {
     { label: "答题正确率", value: percent(stats.accuracy), hint: `累计练习 ${stats.practiceTotal} 次` },
   ];
 
-  const maxActivity = Math.max(...stats.last14Days.map((day) => day.count), 1);
-  const hasActivity = stats.last14Days.some((day) => day.count > 0);
-
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <header className="mb-6 flex items-end justify-between gap-3">
@@ -116,7 +205,7 @@ export default function StatsPage() {
         </Button>
       </header>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((card) => (
           <Card key={card.label}>
             <CardContent className="p-4">
@@ -130,17 +219,53 @@ export default function StatsPage() {
 
       <div className="mt-6 grid gap-4 lg:grid-cols-[2fr_1fr]">
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">学习热力图（近一年）</CardTitle>
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-2">
+            <CardTitle className="text-base">学习热力图</CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedYear}
+                onChange={(event) => {
+                  setSelectedYear(event.target.value);
+                  setSelectedMonth("");
+                }}
+                className="h-9 rounded-md border border-input bg-background px-2 text-[14px]"
+                aria-label="选择年份"
+              >
+                {years.map((year) => (
+                  <option key={year} value={year}>
+                    {year} 年
+                  </option>
+                ))}
+              </select>
+              <select
+                value={selectedMonth}
+                onChange={(event) => setSelectedMonth(event.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-2 text-[14px]"
+                aria-label="选择月份"
+              >
+                <option value="">全年</option>
+                {Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0")).map(
+                  (month) => (
+                    <option key={month} value={month}>
+                      {Number(month)} 月
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
           </CardHeader>
           <CardContent>
-            {activity && activity.days.length > 0 ? (
+            {viewDays.length > 0 ? (
               <>
-                <ActivityHeatmap days={activity.days} maxCount={activity.maxCount} />
+                {selectedMonth ? (
+                  <ActivityHeatmap days={monthDays} maxCount={viewMaxCount} fill cellSize={52} />
+                ) : (
+                  <MonthHeatmap year={selectedYear} days={yearDays} />
+                )}
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                   <span>
-                    累计活跃 {activity.activeDays} 天 · 学习 {activity.total} 词次 · 最长连续{" "}
-                    {activity.longestStreak} 天
+                    {selectedMonth ? `${Number(selectedMonth)} 月` : `${selectedYear} 年`}累计学习{" "}
+                    {viewTotal} 词次 · 活跃 {viewActiveDays} 天
                   </span>
                   <span className="flex items-center gap-1">
                     少
@@ -183,94 +308,88 @@ export default function StatsPage() {
                   key={preset}
                   size="sm"
                   variant={safeGoal === preset ? "default" : "outline"}
-                  onClick={() => setDailyGoal(preset)}
+                  disabled={goalLocked || goalSaving}
+                  onClick={() => void applyGoal(preset)}
                 >
                   {preset} 词
                 </Button>
               ))}
             </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">近 14 天学习量</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {hasActivity ? (
-              <div className="flex h-44 items-end gap-1.5">
-                {stats.last14Days.map((day) => {
-                  const height = Math.max(4, Math.round((day.count / maxActivity) * 100));
-                  return (
-                    <div key={day.date} className="flex flex-1 flex-col items-center gap-1">
-                      <div className="flex w-full flex-1 items-end">
-                        <div
-                          className="w-full rounded-t bg-primary/80 transition-all"
-                          style={{ height: `${height}%` }}
-                          title={`${day.date}：${day.count} 个单词`}
-                        />
-                      </div>
-                      <span className="text-[10px] text-muted-foreground">{day.date.slice(5)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="flex h-44 flex-col items-center justify-center text-center">
-                <BarChart3 className="h-8 w-8 text-muted-foreground" />
-                <p className="mt-3 text-sm text-muted-foreground">还没有学习记录</p>
-                <Button asChild variant="outline" size="sm" className="mt-3">
-                  <Link to="/wordbook">去生词本开始学习</Link>
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-            <CardTitle className="text-base">高频错词 Top 10</CardTitle>
-            {stats.topWrongWords.length > 0 && (
-              <Button asChild variant="outline" size="sm">
-                <Link to="/review?mode=wrong">专项复习</Link>
+            <div className="mt-2 flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={999}
+                inputMode="numeric"
+                value={customGoal}
+                onChange={(event) => setCustomGoal(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void applyGoal(Number(customGoal));
+                }}
+                placeholder="自定义词数"
+                aria-label="自定义每日目标词数"
+                disabled={goalLocked || goalSaving}
+                className="h-9 w-28 text-[14px]"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={goalLocked || goalSaving || !customGoal.trim()}
+                onClick={() => void applyGoal(Number(customGoal))}
+              >
+                设置目标
               </Button>
-            )}
-          </CardHeader>
-          <CardContent>
-            {stats.topWrongWords.length === 0 ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                暂无错词记录，继续保持。
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {stats.topWrongWords.map((item, itemIndex) => (
-                  <div
-                    key={item.word}
-                    className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-                  >
-                    <div className="flex min-w-0 items-center gap-3">
-                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-xs">
-                        {itemIndex + 1}
-                      </span>
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{item.word}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {item.translation || "-"}
-                        </p>
-                      </div>
-                    </div>
-                    <Badge variant="destructive" className="shrink-0">
-                      错 {item.wrong_count} 次
-                    </Badge>
-                  </div>
-                ))}
-              </div>
-            )}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {goalLocked
+                ? "今日已修改过目标，明天可再次调整。"
+                : "每天只能修改一次，按联网北京时间计算。"}
+            </p>
           </CardContent>
         </Card>
       </div>
+
+      <Card className="mt-6">
+        <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+          <CardTitle className="text-base">高频错词 Top 10</CardTitle>
+          {stats.topWrongWords.length > 0 && (
+            <Button asChild variant="outline" size="sm">
+              <Link to="/review?mode=wrong">专项复习</Link>
+            </Button>
+          )}
+        </CardHeader>
+        <CardContent>
+          {stats.topWrongWords.length === 0 ? (
+            <p className="py-12 text-center text-sm text-muted-foreground">
+              暂无错词记录，继续保持。
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {stats.topWrongWords.map((item, itemIndex) => (
+                <div
+                  key={item.word}
+                  className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-secondary text-xs">
+                      {itemIndex + 1}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{item.word}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {item.translation || "-"}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge variant="destructive" className="shrink-0">
+                    错 {item.wrong_count} 次
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="mt-4">
         <CardHeader className="pb-2">

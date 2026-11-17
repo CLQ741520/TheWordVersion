@@ -46,3 +46,11 @@ export async function fetchRecognitionDetail(id: number): Promise<RecognitionDet
     throw new Error(toErrorMessage(error, "获取识别详情失败"));
   }
 }
+
+export async function deleteRecognitionRecord(id: number): Promise<void> {
+  try {
+    await axios.delete(`${API_BASE}/recognition/${id}`);
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "删除识别记录失败"));
+  }
+}

@@ -76,6 +76,13 @@ export default function QuizPage() {
     setAnswers((prev) => [...prev, { id: current.id, correct }]);
   };
 
+  // 点击提示后直接放弃：记为答错，进入错词队列，且不可回退
+  const giveUp = () => {
+    if (!current || selected !== null || current.type !== "spelling") return;
+    setSelected("__give_up__");
+    setAnswers((prev) => [...prev, { id: current.id, correct: false }]);
+  };
+
   const next = async () => {
     if (!current) return;
     if (index + 1 < questions.length) {
@@ -107,14 +114,14 @@ export default function QuizPage() {
 
   if (phase === "idle") {
     return (
-      <div className="mx-auto max-w-2xl px-4 py-12">
+      <div className="mx-auto max-w-3xl px-4 py-12">
         <Card>
           <CardContent className="flex flex-col items-center px-6 py-14 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
               <ListChecks className="h-6 w-6" />
             </div>
             <h1 className="mt-4 text-lg font-semibold">单词测验</h1>
-            <p className="mt-1 max-w-md text-sm text-muted-foreground">
+            <p className="mt-1 text-sm text-muted-foreground">
               从生词本随机抽取最多 {QUIZ_SIZE} 个单词。答错的单词会自动回到复习队列。
             </p>
             <div className="mt-5 flex gap-2">
@@ -283,19 +290,19 @@ export default function QuizPage() {
                 autoFocus
                 className="text-center text-lg"
               />
-              {current.hint && (
-                <p className="mt-2 text-center text-sm text-muted-foreground">
-                  提示：<span className="font-mono tracking-widest">{current.hint}</span>
-                </p>
-              )}
               {!isAnswered && (
-                <Button
-                  className="mt-4 w-full"
-                  onClick={submitSpelling}
-                  disabled={!spellingInput.trim()}
-                >
-                  提交答案
-                </Button>
+                <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                  <Button
+                    className="flex-1"
+                    onClick={submitSpelling}
+                    disabled={!spellingInput.trim()}
+                  >
+                    提交答案
+                  </Button>
+                  <Button variant="outline" className="text-[18px]" onClick={giveUp}>
+                    提示
+                  </Button>
+                </div>
               )}
             </div>
           ) : (
@@ -343,7 +350,7 @@ export default function QuizPage() {
               </p>
               {current.type === "spelling" && (
                 <p className="mt-1 text-center text-sm text-muted-foreground">
-                  你的答案：{selected}
+                  {selected === "__give_up__" ? "已标记为不熟悉" : `你的答案：${selected}`}
                 </p>
               )}
               <Button className="mt-4 w-full" onClick={() => void next()}>
@@ -354,7 +361,7 @@ export default function QuizPage() {
         </CardContent>
       </Card>
 
-      <p className="mt-4 text-center text-xs text-muted-foreground">
+      <p className="mt-4 text-center text-[21px] text-muted-foreground">
         {current.type === "spelling"
           ? "输入答案后按回车提交"
           : "按数字键 1-4 可以快速选择答案"}

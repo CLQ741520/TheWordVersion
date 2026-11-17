@@ -17,14 +17,17 @@ export function AppLayout({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4">
-          <NavLink to="/" className="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-3 px-4 pb-3 pt-[27px]">
+          <NavLink
+            to="/"
+            className="flex shrink-0 items-center justify-center gap-2 text-[32px] font-semibold tracking-tight"
+          >
+            <span className="flex h-11 w-11 items-center justify-center rounded-md bg-primary text-[32px] text-primary-foreground">
               W
             </span>
             <span className="hidden sm:inline">TheWord</span>
           </NavLink>
-          <nav className="flex flex-1 items-center gap-1 overflow-x-auto">
+          <nav className="flex flex-wrap items-center justify-center gap-2">
             {navItems.map(({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}
@@ -32,14 +35,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 end={end}
                 className={({ isActive }) =>
                   cn(
-                    "flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                    "flex h-[77px] shrink-0 items-center justify-center gap-2 rounded-lg px-5 text-[32px] font-medium transition-colors",
                     isActive
                       ? "bg-secondary text-secondary-foreground"
                       : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                   )
                 }
               >
-                <Icon className="h-4 w-4" />
+                <Icon className="h-8 w-8" />
                 <span>{label}</span>
               </NavLink>
             ))}

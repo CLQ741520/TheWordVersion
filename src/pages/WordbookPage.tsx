@@ -278,7 +278,7 @@ export default function WordbookPage() {
               )}
             </TableCell>
             <TableCell className="whitespace-nowrap">
-              <div className="flex items-center gap-1">
+              <div className="flex items-center justify-center gap-1">
                 <Button variant="ghost" size="icon" onClick={() => openEdit(item)} aria-label="编辑">
                   <Pencil className="h-4 w-4" />
                 </Button>
@@ -301,14 +301,14 @@ export default function WordbookPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
-      <header className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+      <header className="mb-6 flex flex-col items-center gap-3 text-center">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">我的生词本</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             共 {total} 个单词，支持搜索、编辑、导出与复习。
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap justify-center gap-2">
           <Button asChild variant="outline">
             <Link to="/review">
               <Sparkles className="mr-2 h-4 w-4" />

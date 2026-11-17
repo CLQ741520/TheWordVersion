@@ -6,6 +6,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
 import fs from 'fs';
+import XLSX from 'xlsx-js-style';
+import mammoth from 'mammoth';
+import { PDFParse } from 'pdf-parse';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -361,6 +364,73 @@ app.post('/api/ocr', async (req, res) => {
     console.error('OCR Error:', error);
     const message = error instanceof Error ? error.message : 'OCR识别失败';
     res.status(500).json({ error: message });
+  }
+});
+
+// ── 文档文本提取（Excel / Word / PDF），用于从文本类文件中提取单词 ──
+app.post('/api/extract-text', async (req, res) => {
+  try {
+    const { fileName, fileBase64 } = req.body ?? {};
+    if (typeof fileName !== 'string' || typeof fileBase64 !== 'string' || !fileBase64) {
+      return res.status(400).json({ error: '缺少文件数据' });
+    }
+
+    const buffer = Buffer.from(fileBase64, 'base64');
+    if (buffer.length === 0) return res.status(400).json({ error: '文件内容为空' });
+    if (buffer.length > 30 * 1024 * 1024) {
+      return res.status(400).json({ error: '文件超过 30MB，请拆分后再上传' });
+    }
+
+    const ext = path.extname(fileName).toLowerCase();
+    let text = '';
+
+    if (ext === '.xlsx' || ext === '.xls' || ext === '.csv') {
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      const lines: string[] = [];
+      for (const sheetName of workbook.SheetNames) {
+        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+          header: 1,
+          raw: false,
+        }) as unknown as unknown[][];
+        for (const row of rows) {
+          const values = row
+            .map((cell) => (cell == null ? '' : String(cell).trim()))
+            .filter((cell) => cell !== '');
+          if (values.length > 0) lines.push(values.join(' '));
+        }
+      }
+      text = lines.join('\n');
+    } else if (ext === '.docx') {
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value;
+    } else if (ext === '.pdf') {
+      const parser = new PDFParse({ data: buffer });
+      try {
+        const result = await parser.getText();
+        text = result.text;
+      } finally {
+        await parser.destroy();
+      }
+    } else if (ext === '.txt' || ext === '.md') {
+      text = buffer.toString('utf8');
+    } else {
+      return res.status(400).json({
+        error: '仅支持 Excel（.xlsx/.xls/.csv）、Word（.docx）、PDF（.pdf）和文本文件',
+      });
+    }
+
+    text = text.trim();
+    if (!text) {
+      return res
+        .status(422)
+        .json({ error: '没有从文件中提取到文本，扫描版 PDF 请改用图片识别' });
+    }
+
+    res.json({ fileName, text });
+  } catch (error) {
+    console.error('Extract text error:', error);
+    const message = error instanceof Error ? error.message : '文件解析失败';
+    res.status(500).json({ error: `文件解析失败：${message}` });
   }
 });
 
@@ -1104,6 +1174,27 @@ app.get('/api/recognition/:id', (req, res) => {
   }
 });
 
+app.delete('/api/recognition/:id', (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: '无效的 ID' });
+
+    const record = dbQueryAll('SELECT id FROM recognition_record WHERE id = ?', [id])[0];
+    if (!record) return res.status(404).json({ error: '识别记录不存在' });
+
+    // 记录与关联单词一起删除，避免留下孤儿数据
+    dbRunBatch([
+      { sql: 'DELETE FROM word_recognition WHERE record_id = ?', params: [id] },
+      { sql: 'DELETE FROM recognition_record WHERE id = ?', params: [id] },
+    ]);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting recognition record:', error);
+    res.status(500).json({ error: '删除识别记录失败' });
+  }
+});
+
 // ── 生词本 ──
 
 /** 生词本全部单词（用于识别结果标记「已收录」） */
@@ -1690,6 +1781,16 @@ app.get('/api/stats/activity', (req, res) => {
     console.error('Error fetching activity:', error);
     res.status(500).json({ error: '获取学习活跃度失败' });
   }
+});
+
+// ── 服务器时间（北京时间），用于每日目标修改校验 ──
+app.get('/api/time', (_req, res) => {
+  const now = new Date();
+  const beijing = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  res.json({
+    iso: now.toISOString(),
+    beijingDate: beijing.toISOString().slice(0, 10),
+  });
 });
 
 app.get('/api/health', (req, res) => {

@@ -234,7 +234,10 @@ export default function ReviewPage() {
             )}
 
             {!revealed ? (
-              <Button className="mt-10" onClick={() => setRevealed(true)}>
+              <Button
+                className="mt-[27px] h-[77px] min-w-[280px] px-10 text-lg"
+                onClick={() => setRevealed(true)}
+              >
                 <Eye className="mr-2 h-4 w-4" />
                 显示释义
                 <span className="ml-1 text-xs opacity-70">（空格）</span>

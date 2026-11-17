@@ -1,6 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDropzone, type FileRejection } from "react-dropzone";
-import { FileImage, Loader2, Trash2, Upload, FileDown, ScanLine, BookPlus } from "lucide-react";
+import {
+  BookPlus,
+  FileDown,
+  FileImage,
+  FileText,
+  Loader2,
+  ScanLine,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,10 +25,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-import { fileToBase64, validateImage } from "@/utils/fileToBase64";
+import { fileToBase64, isImageFile, validateUploadFile } from "@/utils/fileToBase64";
 import { extractEnglishWords, type ExtractedWord } from "@/utils/extractWords";
 import { exportWordInfoToXlsx } from "@/utils/exportXlsx";
-import { recognizeImage } from "@/services/ocrService";
+import { extractTextFromFile, recognizeImage } from "@/services/ocrService";
 import { fetchWordInfo, type WordInfo } from "@/services/wordInfoService";
 import { addWordsToWordbook, fetchWordbookWords } from "@/services/wordbookService";
 import { saveRecognitionRecord } from "@/services/studyService";
@@ -28,6 +37,8 @@ interface PreviewFile {
   id: string;
   file: File;
   preview: string;
+  /** 图片走联网 OCR，文档走文本提取 */
+  kind: "image" | "document";
 }
 
 export const WordOcrPage: React.FC = () => {
@@ -49,15 +60,17 @@ export const WordOcrPage: React.FC = () => {
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newFiles: PreviewFile[] = [];
     for (const file of acceptedFiles) {
-      const validation = validateImage(file);
+      const validation = validateUploadFile(file);
       if (!validation.valid) {
         toast.error(validation.message);
         continue;
       }
+      const image = isImageFile(file);
       newFiles.push({
         id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         file,
-        preview: URL.createObjectURL(file),
+        preview: image ? URL.createObjectURL(file) : "",
+        kind: image ? "image" : "document",
       });
     }
     if (newFiles.length > 0) {
@@ -77,6 +90,11 @@ export const WordOcrPage: React.FC = () => {
     onDropRejected,
     accept: {
       "image/*": [".jpeg", ".jpg", ".png", ".bmp", ".webp"],
+      "application/pdf": [".pdf"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+      "application/vnd.ms-excel": [".xls", ".csv"],
+      "text/plain": [".txt"],
     },
     multiple: true,
   });
@@ -97,7 +115,7 @@ export const WordOcrPage: React.FC = () => {
 
     setIsRecognizing(true);
     setResults([]);
-    const toastId = toast.loading("正在识别图片中的单词，请稍候…");
+    const toastId = toast.loading("正在识别文件中的单词，请稍候…");
 
     const allWords: ExtractedWord[] = [];
     const perImageResults: { imageName: string; imageSize: number; words: string[] }[] = [];
@@ -106,10 +124,16 @@ export const WordOcrPage: React.FC = () => {
     try {
       for (const item of files) {
         try {
-          const base64 = await fileToBase64(item.file);
-          const ocrResult = await recognizeImage(base64);
-          const texts = ocrResult.words_result.map((w) => w.words);
-          const words = extractEnglishWords(texts);
+          let words: ExtractedWord[];
+          if (item.kind === "image") {
+            // 图片统一走联网 OCR（百度 accurate_basic）
+            const base64 = await fileToBase64(item.file);
+            const ocrResult = await recognizeImage(base64);
+            words = extractEnglishWords(ocrResult.words_result.map((w) => w.words));
+          } else {
+            // Excel / Word / PDF 由后端提取文本后提词
+            words = extractEnglishWords([await extractTextFromFile(item.file)]);
+          }
           allWords.push(...words);
           perImageResults.push({
             imageName: item.file.name,
@@ -119,21 +143,21 @@ export const WordOcrPage: React.FC = () => {
         } catch (itemErr) {
           failedCount++;
           const itemMessage = itemErr instanceof Error ? itemErr.message : "未知错误";
-          toast.error(`图片「${item.file.name}」识别失败：${itemMessage}`);
+          toast.error(`文件「${item.file.name}」识别失败：${itemMessage}`);
         }
       }
 
       if (allWords.length === 0) {
         if (failedCount > 0) {
-          toast.error("所有图片均识别失败，请检查图片内容或网络后重试", { id: toastId });
+          toast.error("所有文件均识别失败，请检查文件内容或网络后重试", { id: toastId });
         } else {
-          toast.success("图片中未识别到任何英文单词，请确认图片包含英语内容", { id: toastId });
+          toast.success("文件中未识别到任何英文单词，请确认文件包含英语内容", { id: toastId });
         }
         return;
       }
 
       if (failedCount > 0) {
-        toast.warning(`${failedCount} 张图片识别失败，已跳过`, { id: toastId });
+        toast.warning(`${failedCount} 个文件识别失败，已跳过`, { id: toastId });
       } else {
         toast.loading(`已识别 ${allWords.length} 个单词和词组，正在查询释义…`, { id: toastId });
       }
@@ -283,10 +307,10 @@ export const WordOcrPage: React.FC = () => {
       <div className="mx-auto max-w-5xl px-4 py-8 md:py-12">
         <header className="mb-8 md:mb-12">
           <h1 className="text-2xl font-semibold tracking-tight md:text-3xl text-balance">
-            单词图片识别工具
+            单词识别工具
           </h1>
           <p className="mt-2 text-sm text-muted-foreground md:text-base max-w-prose">
-            上传包含英语单词的图片，自动识别并生成「单词 / 音标 / 中译」表格，支持识别词组；勾选后可一键收录到生词本，继续复习和测验。
+            上传包含英语单词的图片，或 Excel / Word / PDF 文档，自动识别并生成「单词 / 音标 / 中译」表格，支持识别词组；勾选后可一键收录到生词本，继续复习和测验。
           </p>
         </header>
 
@@ -304,8 +328,10 @@ export const WordOcrPage: React.FC = () => {
               <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
                 <Upload className="h-5 w-5 text-muted-foreground" />
               </div>
-              <p className="mt-4 text-sm font-medium">拖拽图片到此处，或点击选择图片</p>
-              <p className="mt-1 text-xs text-muted-foreground">支持 JPG、PNG、BMP、WebP，单张不超过 10MB</p>
+              <p className="mt-4 text-sm font-medium">拖拽图片或文档到此处，或点击选择文件</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                图片：JPG/PNG/BMP/WebP，单张不超过 10MB；文档：Excel（xlsx/xls/csv）、Word（docx）、PDF、TXT，单个不超过 30MB
+              </p>
             </div>
 
             {files.length > 0 && (
@@ -315,11 +341,20 @@ export const WordOcrPage: React.FC = () => {
                     key={item.id}
                     className="group relative aspect-square overflow-hidden rounded-md border border-border bg-muted"
                   >
-                    <img
-                      src={item.preview}
-                      alt={item.file.name}
-                      className="h-full w-full object-cover"
-                    />
+                    {item.kind === "image" ? (
+                      <img
+                        src={item.preview}
+                        alt={item.file.name}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-2 text-center">
+                        <FileText className="h-8 w-8 text-muted-foreground" />
+                        <span className="line-clamp-2 break-all text-xs text-muted-foreground">
+                          {item.file.name}
+                        </span>
+                      </div>
+                    )}
                     <Button
                       type="button"
                       variant="destructive"
@@ -414,7 +449,7 @@ export const WordOcrPage: React.FC = () => {
         {!hasResults && !isRecognizing && (
           <div className="mt-12 flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-secondary/20 py-12 text-center">
             <FileImage className="h-10 w-10 text-muted-foreground" />
-            <p className="mt-4 text-sm text-muted-foreground">上传图片并点击「开始识别」即可生成表格</p>
+            <p className="mt-4 text-sm text-muted-foreground">上传图片或文档并点击「开始识别」即可生成表格</p>
           </div>
         )}
       </div>
