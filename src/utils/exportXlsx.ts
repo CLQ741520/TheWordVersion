@@ -1,4 +1,5 @@
 import type { WordInfo } from "@/services/wordInfoService";
+import type { WordbookItem } from "@/types/study";
 import * as XLSX from "xlsx-js-style";
 
 export function exportWordInfoToXlsx(words: WordInfo[]): void {
@@ -81,7 +82,10 @@ export function exportWordInfoToXlsx(words: WordInfo[]): void {
       if (row === 0) {
         worksheet[cellAddress].s = headerCellStyle;
       } else {
-        if (col === 2 && /[\u4e00-\u9fa5]/.test(cellValue.toString())) {
+        if (col === 1) {
+          // \u97f3\u6807\u5217\u56fa\u5b9a Times New Roman\uff0c\u4e0d\u53c2\u4e0e\u4e2d\u6587\u5224\u65ad
+          worksheet[cellAddress].s = dataCellStyle;
+        } else if (col === 2 && /[\u4e00-\u9fa5]/.test(cellValue.toString())) {
           worksheet[cellAddress].s = chineseCellStyle;
         } else {
           worksheet[cellAddress].s = dataCellStyle;
@@ -118,6 +122,78 @@ export function exportWordInfoToXlsx(words: WordInfo[]): void {
   XLSX.utils.book_append_sheet(workbook, worksheet, "单词识别结果");
 
   XLSX.writeFile(workbook, `单词识别结果_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+/** 导出完整生词本（含复习进度） */
+export function exportWordbookToXlsx(items: WordbookItem[]): void {
+  if (items.length === 0) return;
+
+  const header = ["单词", "音标", "中译", "学习状态", "复习次数", "答对", "答错", "下次复习", "收录时间"];
+  const data = items.map((item) => [
+    item.word || "",
+    item.phonetic || "",
+    item.translation || "",
+    item.status === "mastered" ? "已掌握" : "学习中",
+    String(item.review_count ?? 0),
+    String(item.correct_count ?? 0),
+    String(item.wrong_count ?? 0),
+    item.due_at || "",
+    item.created_at || "",
+  ]);
+
+  const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
+  const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1:I1");
+
+  const border = {
+    top: { style: "thin" },
+    bottom: { style: "thin" },
+    left: { style: "thin" },
+    right: { style: "thin" },
+  } as const;
+
+  for (let row = range.s.r; row <= range.e.r; row++) {
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      const cell = worksheet[address];
+      if (!cell) continue;
+      if (row === 0) {
+        cell.s = {
+          font: { name: "SimSun", sz: 14, bold: true },
+          alignment: { horizontal: "center", vertical: "center" },
+          fill: { fgColor: { rgb: "E0E0E0" } },
+          border,
+        };
+      } else {
+        // 音标列（col 1）显式使用 Times New Roman
+        const isPhonetic = col === 1;
+        const isChinese = !isPhonetic && (col === 0 || col === 2);
+        cell.s = {
+          font: { name: isChinese ? "SimSun" : "Times New Roman", sz: 14 },
+          alignment: { horizontal: "left", vertical: "center", wrapText: true },
+          border,
+        };
+      }
+    }
+  }
+
+  const widths = [14, 18, 32, 12, 10, 8, 8, 20, 20];
+  worksheet["!cols"] = widths.map((wch) => ({ wch }));
+  const rows: number[] = [];
+  for (let row = range.s.r; row <= range.e.r; row++) {
+    let maxHeight = 24;
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const address = XLSX.utils.encode_cell({ r: row, c: col });
+      const value = worksheet[address]?.v ?? "";
+      const lines = Math.ceil(calculateWidth(value) / (widths[col] || 10));
+      maxHeight = Math.max(maxHeight, lines * 20 + 4);
+    }
+    rows.push(maxHeight);
+  }
+  worksheet["!rows"] = rows.map((h) => ({ hpx: h }));
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "我的生词本");
+  XLSX.writeFile(workbook, `生词本_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 function calculateWidth(value: string | number): number {

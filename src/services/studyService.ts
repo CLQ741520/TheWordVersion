@@ -1,0 +1,79 @@
+import axios from "axios";
+
+import type {
+  QuizResponse,
+  ReviewNextState,
+  ReviewQuality,
+  ReviewQueueResponse,
+  StatsResponse,
+} from "@/types/study";
+
+const API_BASE = "/api";
+
+function toErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const message = error.response?.data?.error;
+    if (typeof message === "string" && message) return message;
+  }
+  return fallback;
+}
+
+export async function fetchReviewQueue(limit = 50): Promise<ReviewQueueResponse> {
+  try {
+    const response = await axios.get(`${API_BASE}/review/queue`, { params: { limit } });
+    return response.data;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "获取复习队列失败"));
+  }
+}
+
+export async function submitReview(id: number, quality: ReviewQuality): Promise<ReviewNextState> {
+  try {
+    const response = await axios.post(`${API_BASE}/review/${id}`, { quality });
+    return response.data.next;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "提交复习结果失败"));
+  }
+}
+
+export async function fetchQuiz(limit = 10): Promise<QuizResponse> {
+  try {
+    const response = await axios.get(`${API_BASE}/quiz`, { params: { limit } });
+    return response.data;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "生成测验失败"));
+  }
+}
+
+export async function submitQuizResult(
+  results: { id: number; correct: boolean }[]
+): Promise<void> {
+  try {
+    await axios.post(`${API_BASE}/quiz/result`, { results });
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "保存测验结果失败"));
+  }
+}
+
+export async function fetchStats(): Promise<StatsResponse> {
+  try {
+    const response = await axios.get(`${API_BASE}/stats`);
+    return response.data;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "获取学习统计失败"));
+  }
+}
+
+export async function saveRecognitionRecord(payload: {
+  imageName: string;
+  imageSize: number;
+  words: string[];
+  status: string;
+}): Promise<void> {
+  try {
+    await axios.post(`${API_BASE}/recognition`, payload);
+  } catch (error) {
+    // 识别记录保存失败不阻塞主流程，仅在控制台留痕
+    console.warn("保存识别记录失败:", error);
+  }
+}
