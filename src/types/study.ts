@@ -33,10 +33,13 @@ export interface AddWordbookResult {
   items: WordbookItem[];
 }
 
+export type ReviewQueueMode = "due" | "wrong";
+
 export interface ReviewQueueResponse {
   items: WordbookItem[];
   dueCount: number;
   totalCount: number;
+  mode?: ReviewQueueMode;
 }
 
 export type ReviewQuality = 0 | 1 | 2;
@@ -49,7 +52,7 @@ export interface ReviewNextState {
   status: WordbookStatus;
 }
 
-export type QuizType = "en2zh" | "zh2en";
+export type QuizType = "en2zh" | "zh2en" | "spelling";
 
 export interface QuizQuestion {
   id: number;
@@ -60,6 +63,7 @@ export interface QuizQuestion {
   prompt: string;
   answer: string;
   options: string[];
+  hint?: string;
 }
 
 export interface QuizResponse {
@@ -79,6 +83,19 @@ export interface TopWrongWord {
   phonetic: string;
   translation: string;
   wrong_count: number;
+}
+
+export interface ActivityDay {
+  date: string;
+  count: number;
+}
+
+export interface ActivityResponse {
+  days: ActivityDay[];
+  total: number;
+  activeDays: number;
+  maxCount: number;
+  longestStreak: number;
 }
 
 export interface StatsResponse {

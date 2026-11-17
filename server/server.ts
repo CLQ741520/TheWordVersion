@@ -127,15 +127,16 @@ function dbQueryAll(sql: string, params: any[] = []): any[] {
   return rows;
 }
 
-/** 执行辅助：INSERT / UPDATE / DELETE */
-function dbRun(sql: string, params: any[] = []) {
+/**
+ * 执行辅助：INSERT / UPDATE / DELETE
+ * 注意：saveDatabase() 内部调用 db.export() 会把 last_insert_rowid 重置为 0，
+ * 所以必须在落盘前读取自增 ID 并返回。
+ */
+function dbRun(sql: string, params: any[] = []): number {
   db.run(sql, params);
+  const lastInsertId = Number(db.exec('SELECT last_insert_rowid()')[0]?.values[0][0] ?? 0);
   saveDatabase();
-}
-
-/** 获取最后插入的 ID */
-function dbLastInsertId(): number {
-  return db.exec("SELECT last_insert_rowid() as id")[0]?.values[0][0] ?? 0;
+  return lastInsertId;
 }
 
 /** 批量写入：事务内执行，结束后只落盘一次 */
@@ -1003,21 +1004,103 @@ app.post('/api/recognition', async (req, res) => {
     const { imageName, imageSize, status, errorMessage } = req.body;
     const words = Array.isArray(req.body?.words) ? req.body.words : [];
 
-    dbRun(
+    const recordId = dbRun(
       'INSERT INTO recognition_record (image_name, image_size, recognized_words, status, error_message) VALUES (?, ?, ?, ?, ?)',
       [imageName || '', imageSize || 0, JSON.stringify(words), status || 'success', errorMessage || '']
     );
 
-    const recordId = dbLastInsertId();
-
-    for (const word of words) {
-      dbRun('INSERT INTO word_recognition (record_id, word) VALUES (?, ?)', [recordId, word]);
+    if (words.length > 0) {
+      dbRunBatch(
+        words.map((word: string) => ({
+          sql: 'INSERT INTO word_recognition (record_id, word) VALUES (?, ?)',
+          params: [recordId, word],
+        }))
+      );
     }
 
     res.json({ success: true, recordId });
   } catch (error) {
     console.error('Error saving recognition:', error);
     res.status(500).json({ error: 'Failed to save recognition' });
+  }
+});
+
+// ── 识别历史 ──
+
+app.get('/api/recognition', (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 10000);
+    const pageSize = parsePositiveInt(req.query.pageSize, 20, 100);
+    const q = String(req.query.q ?? '').trim();
+    const whereClause = q ? 'WHERE r.image_name LIKE ?' : '';
+    const filterParams = q ? [`%${q}%`] : [];
+
+    const total =
+      dbQueryAll(`SELECT COUNT(*) AS c FROM recognition_record r ${whereClause}`, filterParams)[0]
+        ?.c ?? 0;
+
+    const items = dbQueryAll(
+      `SELECT r.id, r.image_name, r.image_size, r.status, r.error_message, r.created_at,
+              (SELECT COUNT(*) FROM word_recognition wr WHERE wr.record_id = r.id) AS word_count
+       FROM recognition_record r
+       ${whereClause}
+       ORDER BY r.id DESC
+       LIMIT ? OFFSET ?`,
+      [...filterParams, pageSize, (page - 1) * pageSize]
+    );
+
+    res.json({ items, total, page, pageSize });
+  } catch (error) {
+    console.error('Error fetching recognition records:', error);
+    res.status(500).json({ error: '获取识别历史失败' });
+  }
+});
+
+app.get('/api/recognition/:id', (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: '无效的 ID' });
+
+    const record = dbQueryAll('SELECT * FROM recognition_record WHERE id = ?', [id])[0];
+    if (!record) return res.status(404).json({ error: '识别记录不存在' });
+
+    let words: string[] = dbQueryAll(
+      'SELECT word FROM word_recognition WHERE record_id = ? ORDER BY id',
+      [id]
+    ).map((row: any) => String(row.word));
+
+    if (words.length === 0) {
+      try {
+        const parsed = JSON.parse(record.recognized_words || '[]');
+        if (Array.isArray(parsed)) {
+          words = parsed.filter((word: any) => typeof word === 'string');
+        }
+      } catch {
+        words = [];
+      }
+    }
+
+    const inWordbook = new Set<string>(
+      words.length > 0
+        ? dbQueryAll(
+            `SELECT word FROM wordbook WHERE word IN (${words.map(() => '?').join(',')})`,
+            words
+          ).map((row: any) => String(row.word))
+        : []
+    );
+
+    res.json({
+      id: record.id,
+      imageName: record.image_name,
+      imageSize: record.image_size,
+      status: record.status,
+      errorMessage: record.error_message,
+      createdAt: record.created_at,
+      words: words.map((word) => ({ word, inWordbook: inWordbook.has(word) })),
+    });
+  } catch (error) {
+    console.error('Error fetching recognition detail:', error);
+    res.status(500).json({ error: '获取识别详情失败' });
   }
 });
 
@@ -1183,7 +1266,17 @@ app.patch('/api/wordbook/:id', (req, res) => {
       sets.push('translation = ?');
       params.push(req.body.translation.trim());
     }
-    if (req.body?.status === 'learning' || req.body?.status === 'mastered') {
+    const resetProgress = req.body?.resetProgress === true;
+    if (resetProgress) {
+      sets.push('repetitions = 0', 'ease = 2.5', 'interval_days = 0');
+      sets.push("due_at = datetime('now', 'localtime')");
+      sets.push('last_review_at = NULL');
+      sets.push("status = 'learning'");
+    }
+    if (
+      !resetProgress &&
+      (req.body?.status === 'learning' || req.body?.status === 'mastered')
+    ) {
       sets.push('status = ?');
       params.push(req.body.status);
     }
@@ -1233,18 +1326,21 @@ app.post('/api/wordbook/batch-delete', (req, res) => {
 app.get('/api/review/queue', (req, res) => {
   try {
     const limit = parsePositiveInt(req.query.limit, 20, 100);
+    const mode = req.query.mode === 'wrong' ? 'wrong' : 'due';
+    const where =
+      mode === 'wrong'
+        ? 'wrong_count > 0'
+        : "due_at IS NULL OR due_at <= datetime('now', 'localtime')";
+    const orderBy =
+      mode === 'wrong' ? 'wrong_count DESC, updated_at DESC, id ASC' : 'due_at ASC, id ASC';
+
     const items = dbQueryAll(
-      `SELECT * FROM wordbook
-       WHERE due_at IS NULL OR due_at <= datetime('now', 'localtime')
-       ORDER BY due_at ASC, id ASC
-       LIMIT ?`,
+      `SELECT * FROM wordbook WHERE ${where} ORDER BY ${orderBy} LIMIT ?`,
       [limit]
     );
-    const dueCount = dbQueryAll(
-      `SELECT COUNT(*) AS c FROM wordbook WHERE due_at IS NULL OR due_at <= datetime('now', 'localtime')`
-    )[0]?.c ?? 0;
+    const dueCount = dbQueryAll(`SELECT COUNT(*) AS c FROM wordbook WHERE ${where}`)[0]?.c ?? 0;
     const totalCount = dbQueryAll('SELECT COUNT(*) AS c FROM wordbook')[0]?.c ?? 0;
-    res.json({ items, dueCount, totalCount });
+    res.json({ items, dueCount, totalCount, mode });
   } catch (error) {
     console.error('Error fetching review queue:', error);
     res.status(500).json({ error: '获取复习队列失败' });
@@ -1314,10 +1410,35 @@ function shuffle<T>(items: T[]): T[] {
 app.get('/api/quiz', (req, res) => {
   try {
     const limit = parsePositiveInt(req.query.limit, 10, 30);
+    const mode = req.query.mode === 'spelling' ? 'spelling' : 'choice';
     const pool = dbQueryAll(
       `SELECT id, word, phonetic, translation FROM wordbook
        WHERE translation IS NOT NULL AND translation != ''`
     );
+
+    if (mode === 'spelling') {
+      if (pool.length === 0) {
+        return res.json({
+          questions: [],
+          message: '生词本还没有带释义的单词，先去识别页面收录一些吧',
+        });
+      }
+      const picked = shuffle(pool).slice(0, Math.min(limit, pool.length));
+      const questions = picked.map((row: any) => ({
+        id: row.id,
+        word: row.word,
+        phonetic: row.phonetic,
+        translation: row.translation,
+        type: 'spelling',
+        prompt: row.translation,
+        answer: row.word,
+        options: [],
+        hint: String(row.word).replace(/[A-Za-z]+/g, (part: string) => {
+          return part[0] + '_'.repeat(Math.max(0, part.length - 1));
+        }),
+      }));
+      return res.json({ questions });
+    }
 
     if (pool.length < 4) {
       return res.json({
@@ -1519,6 +1640,55 @@ app.get('/api/stats', (_req, res) => {
   } catch (error) {
     console.error('Error fetching stats:', error);
     res.status(500).json({ error: '获取学习统计失败' });
+  }
+});
+
+// ── 学习活跃度（热力图） ──
+
+app.get('/api/stats/activity', (req, res) => {
+  try {
+    const days = parsePositiveInt(req.query.days, 365, 730);
+    const rows = dbQueryAll(
+      `SELECT date(created_at) AS d, COUNT(DISTINCT word) AS c
+       FROM study_record
+       WHERE action != 'add'
+       GROUP BY d`
+    );
+    const counts = new Map<string, number>(
+      rows.map((r: any) => [String(r.d), Number(r.c) || 0])
+    );
+
+    const result: { date: string; count: number }[] = [];
+    const cursor = new Date();
+    cursor.setHours(0, 0, 0, 0);
+    cursor.setDate(cursor.getDate() - (days - 1));
+    for (let i = 0; i < days; i++) {
+      const key = formatLocalDateOnly(cursor);
+      result.push({ date: key, count: counts.get(key) ?? 0 });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    let longestStreak = 0;
+    let currentStreak = 0;
+    for (const day of result) {
+      if (day.count > 0) {
+        currentStreak += 1;
+        longestStreak = Math.max(longestStreak, currentStreak);
+      } else {
+        currentStreak = 0;
+      }
+    }
+
+    res.json({
+      days: result,
+      total: result.reduce((sum, day) => sum + day.count, 0),
+      activeDays: result.filter((day) => day.count > 0).length,
+      maxCount: result.reduce((max, day) => Math.max(max, day.count), 0),
+      longestStreak,
+    });
+  } catch (error) {
+    console.error('Error fetching activity:', error);
+    res.status(500).json({ error: '获取学习活跃度失败' });
   }
 });
 

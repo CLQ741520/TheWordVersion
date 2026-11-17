@@ -1,9 +1,11 @@
 import axios from "axios";
 
 import type {
+  ActivityResponse,
   QuizResponse,
   ReviewNextState,
   ReviewQuality,
+  ReviewQueueMode,
   ReviewQueueResponse,
   StatsResponse,
 } from "@/types/study";
@@ -18,9 +20,12 @@ function toErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export async function fetchReviewQueue(limit = 50): Promise<ReviewQueueResponse> {
+export async function fetchReviewQueue(
+  limit = 50,
+  mode: ReviewQueueMode = "due"
+): Promise<ReviewQueueResponse> {
   try {
-    const response = await axios.get(`${API_BASE}/review/queue`, { params: { limit } });
+    const response = await axios.get(`${API_BASE}/review/queue`, { params: { limit, mode } });
     return response.data;
   } catch (error) {
     throw new Error(toErrorMessage(error, "获取复习队列失败"));
@@ -36,9 +41,12 @@ export async function submitReview(id: number, quality: ReviewQuality): Promise<
   }
 }
 
-export async function fetchQuiz(limit = 10): Promise<QuizResponse> {
+export async function fetchQuiz(
+  limit = 10,
+  mode: "choice" | "spelling" = "choice"
+): Promise<QuizResponse> {
   try {
-    const response = await axios.get(`${API_BASE}/quiz`, { params: { limit } });
+    const response = await axios.get(`${API_BASE}/quiz`, { params: { limit, mode } });
     return response.data;
   } catch (error) {
     throw new Error(toErrorMessage(error, "生成测验失败"));
@@ -61,6 +69,15 @@ export async function fetchStats(): Promise<StatsResponse> {
     return response.data;
   } catch (error) {
     throw new Error(toErrorMessage(error, "获取学习统计失败"));
+  }
+}
+
+export async function fetchActivity(days = 365): Promise<ActivityResponse> {
+  try {
+    const response = await axios.get(`${API_BASE}/stats/activity`, { params: { days } });
+    return response.data;
+  } catch (error) {
+    throw new Error(toErrorMessage(error, "获取学习活跃度失败"));
   }
 }
 

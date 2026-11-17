@@ -70,7 +70,12 @@ export async function addWordsToWordbook(
 
 export async function updateWordbookItem(
   id: number,
-  patch: { phonetic?: string; translation?: string; status?: WordbookStatus }
+  patch: {
+    phonetic?: string;
+    translation?: string;
+    status?: WordbookStatus;
+    resetProgress?: boolean;
+  }
 ): Promise<WordbookItem> {
   try {
     const response = await axios.patch(`${API_BASE}/wordbook/${id}`, patch);
