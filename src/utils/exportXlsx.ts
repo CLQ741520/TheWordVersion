@@ -196,6 +196,106 @@ export function exportWordbookToXlsx(items: WordbookItem[]): void {
   XLSX.writeFile(workbook, `生词本_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
+/** 把单词挖空：保留每个字母序列的首字母，其余替换为下划线 */
+export function maskWord(word: string): string {
+  return String(word || "").replace(/[A-Za-z]+/g, (part) => {
+    if (part.length <= 1) return part;
+    return part[0] + "_".repeat(part.length - 1);
+  });
+}
+
+/** 导出挖空练习：一个 sheet 给学生练习，一个 sheet 放答案 */
+export function exportClozeToXlsx(items: WordbookItem[]): void {
+  if (items.length === 0) return;
+
+  const border = {
+    top: { style: "thin" },
+    bottom: { style: "thin" },
+    left: { style: "thin" },
+    right: { style: "thin" },
+  } as const;
+
+  const buildSheet = (
+    header: string[],
+    data: (string | number)[][],
+    widths: number[],
+    chineseCols: number[]
+  ) => {
+    const worksheet = XLSX.utils.aoa_to_sheet([header, ...data]);
+    const range = XLSX.utils.decode_range(worksheet["!ref"] || "A1");
+    const lastCol = header.length - 1;
+
+    for (let row = range.s.r; row <= range.e.r; row++) {
+      for (let col = 0; col <= lastCol; col++) {
+        const address = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[address];
+        if (!cell) continue;
+        if (row === 0) {
+          cell.s = {
+            font: { name: "SimSun", sz: 14, bold: true },
+            alignment: { horizontal: "center", vertical: "center" },
+            fill: { fgColor: { rgb: "E0E0E0" } },
+            border,
+          };
+        } else {
+          cell.s = {
+            font: {
+              name: chineseCols.includes(col) ? "SimSun" : "Times New Roman",
+              sz: 14,
+            },
+            alignment: { horizontal: "left", vertical: "center", wrapText: true },
+            border,
+          };
+        }
+      }
+    }
+
+    worksheet["!cols"] = widths.map((wch) => ({ wch }));
+    const heights: number[] = [];
+    for (let row = range.s.r; row <= range.e.r; row++) {
+      let maxHeight = 24;
+      for (let col = 0; col <= lastCol; col++) {
+        const address = XLSX.utils.encode_cell({ r: row, c: col });
+        const value = worksheet[address]?.v ?? "";
+        const lines = Math.ceil(calculateWidth(value) / (widths[col] || 10));
+        maxHeight = Math.max(maxHeight, lines * 20 + 4);
+      }
+      heights.push(maxHeight);
+    }
+    worksheet["!rows"] = heights.map((h) => ({ hpx: h }));
+    return worksheet;
+  };
+
+  const practiceHeader = ["序号", "音标", "中译", "挖空单词"];
+  const practiceData = items.map((item, index) => [
+    index + 1,
+    item.phonetic || "",
+    item.translation || "",
+    maskWord(item.word),
+  ]);
+
+  const answerHeader = ["序号", "单词", "音标", "中译"];
+  const answerData = items.map((item, index) => [
+    index + 1,
+    item.word || "",
+    item.phonetic || "",
+    item.translation || "",
+  ]);
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    buildSheet(practiceHeader, practiceData, [8, 18, 32, 22], [2]),
+    "挖空练习"
+  );
+  XLSX.utils.book_append_sheet(
+    workbook,
+    buildSheet(answerHeader, answerData, [8, 18, 18, 32], [3]),
+    "答案"
+  );
+  XLSX.writeFile(workbook, `挖空练习_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
 function calculateWidth(value: string | number): number {
   const str = String(value);
   let width = 0;

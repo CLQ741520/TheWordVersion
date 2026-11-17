@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   FileDown,
+  FileSpreadsheet,
   Loader2,
   Pencil,
   Plus,
@@ -45,26 +46,10 @@ import {
   updateWordbookItem,
 } from "@/services/wordbookService";
 import type { WordbookItem, WordbookStatus } from "@/types/study";
-import { exportWordbookToXlsx } from "@/utils/exportXlsx";
+import { formatDueLabel as formatDue } from "@/lib/date";
+import { exportClozeToXlsx, exportWordbookToXlsx } from "@/utils/exportXlsx";
 
 const PAGE_SIZE = 15;
-
-function formatDue(due: string | null): { text: string; overdue: boolean } {
-  if (!due) return { text: "-", overdue: false };
-  const date = new Date(due.replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) return { text: due, overdue: false };
-
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const dueStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const diffDays = Math.round((dueStart.getTime() - todayStart.getTime()) / 86400000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-
-  if (diffDays < 0) return { text: "待复习", overdue: true };
-  if (diffDays === 0) return { text: `今天 ${pad(date.getHours())}:${pad(date.getMinutes())}`, overdue: false };
-  if (diffDays === 1) return { text: "明天", overdue: false };
-  return { text: `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`, overdue: false };
-}
 
 export default function WordbookPage() {
   const [items, setItems] = useState<WordbookItem[]>([]);
@@ -80,8 +65,15 @@ export default function WordbookPage() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<WordbookItem | null>(null);
-  const [form, setForm] = useState({ word: "", phonetic: "", translation: "" });
+  const [form, setForm] = useState({
+    word: "",
+    phonetic: "",
+    translation: "",
+    status: "learning" as WordbookStatus,
+    resetProgress: false,
+  });
   const [saving, setSaving] = useState(false);
+  const [exportingCloze, setExportingCloze] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -138,7 +130,7 @@ export default function WordbookPage() {
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ word: "", phonetic: "", translation: "" });
+    setForm({ word: "", phonetic: "", translation: "", status: "learning", resetProgress: false });
     setDialogOpen(true);
   };
 
@@ -148,6 +140,8 @@ export default function WordbookPage() {
       word: item.word,
       phonetic: item.phonetic,
       translation: item.translation,
+      status: item.status,
+      resetProgress: false,
     });
     setDialogOpen(true);
   };
@@ -163,8 +157,10 @@ export default function WordbookPage() {
         await updateWordbookItem(editing.id, {
           phonetic: form.phonetic.trim(),
           translation: form.translation.trim(),
+          status: form.status,
+          resetProgress: form.resetProgress,
         });
-        toast.success("单词已更新");
+        toast.success(form.resetProgress ? "单词已更新并重置复习进度" : "单词已更新");
       } else {
         const result = await addWordsToWordbook(
           [
@@ -225,6 +221,23 @@ export default function WordbookPage() {
       toast.error(error instanceof Error ? error.message : "导出失败");
     } finally {
       setExporting(false);
+    }
+  };
+
+  const handleExportCloze = async () => {
+    setExportingCloze(true);
+    try {
+      const all = await fetchAllWordbookWords({ q: debouncedQ, status });
+      if (all.length === 0) {
+        toast.error("没有可导出的单词");
+        return;
+      }
+      exportClozeToXlsx(all);
+      toast.success(`已生成 ${all.length} 个单词的挖空练习`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出挖空题失败");
+    } finally {
+      setExportingCloze(false);
     }
   };
 
@@ -309,6 +322,18 @@ export default function WordbookPage() {
               <FileDown className="mr-2 h-4 w-4" />
             )}
             导出 Excel
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleExportCloze}
+            disabled={exportingCloze || total === 0}
+          >
+            {exportingCloze ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="mr-2 h-4 w-4" />
+            )}
+            导出挖空题
           </Button>
           <Button onClick={openCreate}>
             <Plus className="mr-2 h-4 w-4" />
@@ -435,7 +460,7 @@ export default function WordbookPage() {
             <DialogTitle>{editing ? "编辑单词" : "新增单词"}</DialogTitle>
             <DialogDescription>
               {editing
-                ? "修改音标或释义后保存。"
+                ? "修改音标、释义或学习状态后保存；也可重置复习进度。"
                 : "手动添加单词，音标和释义留空时会自动联网查询。"}
             </DialogDescription>
           </DialogHeader>
@@ -479,6 +504,47 @@ export default function WordbookPage() {
                 rows={3}
               />
             </div>
+            {editing && (
+              <>
+                <div className="space-y-1.5">
+                  <label htmlFor="status-input" className="text-sm font-medium">
+                    学习状态
+                  </label>
+                  <select
+                    id="status-input"
+                    value={form.status}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        status: event.target.value as WordbookStatus,
+                      }))
+                    }
+                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="learning">学习中</option>
+                    <option value="mastered">已掌握</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    状态仅作标记，不会改变下次复习时间。
+                  </p>
+                </div>
+                <label className="flex items-start gap-2 rounded-md border p-3 text-sm">
+                  <Checkbox
+                    checked={form.resetProgress}
+                    onCheckedChange={(checked) =>
+                      setForm((prev) => ({ ...prev, resetProgress: checked === true }))
+                    }
+                    aria-label="重置复习进度"
+                  />
+                  <span>
+                    重置复习进度
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      清空间隔重复记录并标记为学习中，该单词会重新进入复习队列。
+                    </span>
+                  </span>
+                </label>
+              </>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>
