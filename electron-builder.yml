@@ -1,0 +1,47 @@
+appId: com.lushengxing.asywl
+productName: AsyWL
+copyright: Copyright © 2026 卢盛兴
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - electron/**/*
+  - electron-dist/**/*
+  - package.json
+  - "!**/*.map"
+extraResources:
+  - from: build/env
+    to: env
+asarUnpack:
+  - node_modules/sql.js/**
+  - node_modules/pdf-parse/**
+  - node_modules/pdfjs-dist/**
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AsyWL
+  artifactName: AsyWL-Setup-${version}.${ext}
+portable:
+  artifactName: AsyWL-Portable-${version}.${ext}
+mac:
+  icon: build/icon.png
+  category: public.app-category.education
+  identity: null
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+dmg:
+  artifactName: AsyWL-${version}-${arch}.${ext}

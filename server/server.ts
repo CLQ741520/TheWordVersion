@@ -16,6 +16,8 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+// 桌面版通过 HOST=127.0.0.1 限制为仅本机访问；服务器部署默认监听所有网卡
+const HOST = process.env.HOST || '0.0.0.0';
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -1806,6 +1808,6 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT} (${process.env.NODE_ENV || 'development'})`);
+app.listen(PORT, HOST, () => {
+  console.log(`Server running on http://${HOST}:${PORT} (${process.env.NODE_ENV || 'development'})`);
 });

@@ -38,3 +38,9 @@ history/*.json
 # SQLite 数据库文件与备份
 data/*.db
 data/*.db.bak-*
+
+# Electron 桌面版构建产物
+release
+electron-dist
+build/env
+

@@ -23,9 +23,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
             className="flex shrink-0 items-center justify-center gap-2 text-[32px] font-semibold tracking-tight"
           >
             <span className="flex h-11 w-11 items-center justify-center rounded-md bg-primary text-[32px] text-primary-foreground">
-              W
+              A
             </span>
-            <span className="hidden sm:inline">TheWord</span>
+            <span className="hidden sm:inline">AsyWL</span>
+            <span className="hidden text-[21px] font-normal text-muted-foreground md:inline">
+              AsyWordLearning
+            </span>
+            <span className="hidden text-[21px] font-normal text-muted-foreground sm:inline">
+              · 忆廿
+            </span>
           </NavLink>
           <nav className="flex flex-wrap items-center justify-center gap-2">
             {navItems.map(({ to, label, icon: Icon, end }) => (
