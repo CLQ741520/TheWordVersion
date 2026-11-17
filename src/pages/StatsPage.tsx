@@ -3,11 +3,14 @@ import { Link } from "react-router-dom";
 import { BarChart3, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
+import { ActivityHeatmap } from "@/components/ActivityHeatmap";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { fetchStats } from "@/services/studyService";
-import type { StatsResponse } from "@/types/study";
+import { Progress } from "@/components/ui/progress";
+import { useLocalStorage } from "@/hooks/useLocalStorage";
+import { fetchActivity, fetchStats } from "@/services/studyService";
+import type { ActivityResponse, StatsResponse } from "@/types/study";
 import { cn } from "@/lib/utils";
 
 const actionLabels: Record<string, string> = {
@@ -32,14 +35,26 @@ function percent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+const GOAL_PRESETS = [10, 20, 30, 50];
+
 export default function StatsPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [activity, setActivity] = useState<ActivityResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dailyGoal, setDailyGoal] = useLocalStorage<number>("theword:daily-goal", 20);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setStats(await fetchStats());
+      const [statsResult, activityResult] = await Promise.allSettled([
+        fetchStats(),
+        fetchActivity(365),
+      ]);
+      if (statsResult.status === "rejected") throw statsResult.reason;
+      setStats(statsResult.value);
+      if (activityResult.status === "fulfilled") {
+        setActivity(activityResult.value);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "获取学习统计失败");
     } finally {
@@ -70,6 +85,9 @@ export default function StatsPage() {
       </div>
     );
   }
+
+  const safeGoal = Math.max(1, Number(dailyGoal) || 1);
+  const goalProgress = Math.min(100, Math.round((stats.todayStudied / safeGoal) * 100));
 
   const cards = [
     { label: "生词本总数", value: stats.wordbookTotal, hint: "已收录单词" },
@@ -110,6 +128,71 @@ export default function StatsPage() {
         ))}
       </div>
 
+      <div className="mt-6 grid gap-4 lg:grid-cols-[2fr_1fr]">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">学习热力图（近一年）</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {activity && activity.days.length > 0 ? (
+              <>
+                <ActivityHeatmap days={activity.days} maxCount={activity.maxCount} />
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>
+                    累计活跃 {activity.activeDays} 天 · 学习 {activity.total} 词次 · 最长连续{" "}
+                    {activity.longestStreak} 天
+                  </span>
+                  <span className="flex items-center gap-1">
+                    少
+                    <span className="inline-block h-3 w-3 rounded-sm bg-secondary" />
+                    <span className="inline-block h-3 w-3 rounded-sm bg-emerald-200" />
+                    <span className="inline-block h-3 w-3 rounded-sm bg-emerald-400" />
+                    <span className="inline-block h-3 w-3 rounded-sm bg-emerald-600" />
+                    <span className="inline-block h-3 w-3 rounded-sm bg-emerald-800" />
+                    多
+                  </span>
+                </div>
+              </>
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">还没有学习记录</p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">每日学习目标</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-end justify-between gap-2">
+              <div>
+                <p className="text-3xl font-semibold tracking-tight">
+                  {stats.todayStudied}
+                  <span className="text-base font-normal text-muted-foreground"> / {safeGoal}</span>
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">今日已练习（不含新收录）</p>
+              </div>
+              <Badge variant={goalProgress >= 100 ? "success" : "secondary"}>
+                {goalProgress}%
+              </Badge>
+            </div>
+            <Progress value={goalProgress} className="mt-4" />
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {GOAL_PRESETS.map((preset) => (
+                <Button
+                  key={preset}
+                  size="sm"
+                  variant={safeGoal === preset ? "default" : "outline"}
+                  onClick={() => setDailyGoal(preset)}
+                >
+                  {preset} 词
+                </Button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
@@ -147,8 +230,13 @@ export default function StatsPage() {
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
+          <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
             <CardTitle className="text-base">高频错词 Top 10</CardTitle>
+            {stats.topWrongWords.length > 0 && (
+              <Button asChild variant="outline" size="sm">
+                <Link to="/review?mode=wrong">专项复习</Link>
+              </Button>
+            )}
           </CardHeader>
           <CardContent>
             {stats.topWrongWords.length === 0 ? (
