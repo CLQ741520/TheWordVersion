@@ -69,6 +69,38 @@ async function initDatabase() {
       FOREIGN KEY (record_id) REFERENCES recognition_record(id) ON DELETE CASCADE
     )
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS wordbook (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      word TEXT NOT NULL UNIQUE,
+      phonetic TEXT DEFAULT '',
+      translation TEXT DEFAULT '',
+      source TEXT DEFAULT 'manual',
+      status TEXT DEFAULT 'learning',
+      repetitions INTEGER DEFAULT 0,
+      ease REAL DEFAULT 2.5,
+      interval_days INTEGER DEFAULT 0,
+      due_at TEXT DEFAULT (datetime('now', 'localtime')),
+      last_review_at TEXT,
+      review_count INTEGER DEFAULT 0,
+      correct_count INTEGER DEFAULT 0,
+      wrong_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now', 'localtime')),
+      updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS study_record (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      word TEXT NOT NULL,
+      action TEXT NOT NULL,
+      quality INTEGER,
+      created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    )
+  `);
+  db.run('CREATE INDEX IF NOT EXISTS idx_wordbook_due ON wordbook(due_at)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_study_record_created ON study_record(created_at)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_study_record_word ON study_record(word)');
 
   saveDatabase();
   console.log(`SQLite 数据库已就绪: ${DB_PATH}`);
@@ -104,6 +136,145 @@ function dbRun(sql: string, params: any[] = []) {
 /** 获取最后插入的 ID */
 function dbLastInsertId(): number {
   return db.exec("SELECT last_insert_rowid() as id")[0]?.values[0][0] ?? 0;
+}
+
+/** 批量写入：事务内执行，结束后只落盘一次 */
+function dbRunBatch(statements: { sql: string; params: any[] }[]) {
+  if (statements.length === 0) return;
+  db.run('BEGIN');
+  try {
+    for (const stmt of statements) db.run(stmt.sql, stmt.params);
+    db.run('COMMIT');
+  } catch (error) {
+    db.run('ROLLBACK');
+    throw error;
+  }
+  saveDatabase();
+}
+
+/** 本地时间格式，与 SQLite datetime('now','localtime') 保持一致 */
+function formatLocalDateTime(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+function formatLocalDateOnly(date: Date): string {
+  return formatLocalDateTime(date).slice(0, 10);
+}
+
+/** 限制并发地执行异步任务，避免一次性打爆第三方接口 */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+type ReviewQuality = 0 | 1 | 2; // 0=忘记 1=模糊 2=认识
+
+interface ReviewState {
+  repetitions: number;
+  ease: number;
+  interval_days: number;
+  due_at: string;
+  status: 'learning' | 'mastered';
+}
+
+/** 三档简易 SM-2 间隔重复调度 */
+function scheduleNextReview(row: any, quality: ReviewQuality): ReviewState {
+  let repetitions = Number(row.repetitions) || 0;
+  let ease = Number(row.ease) || 2.5;
+  let intervalDays = Number(row.interval_days) || 0;
+
+  if (quality === 2) {
+    repetitions += 1;
+    if (repetitions === 1) intervalDays = 1;
+    else if (repetitions === 2) intervalDays = 3;
+    else intervalDays = Math.max(1, Math.round((intervalDays || 1) * ease));
+    ease = Math.min(3.0, ease + 0.1);
+  } else if (quality === 1) {
+    intervalDays = Math.max(1, Math.round((intervalDays || 1) * 0.6));
+  } else {
+    repetitions = 0;
+    intervalDays = 1;
+    ease = Math.max(1.3, ease - 0.2);
+  }
+
+  const due = new Date();
+  due.setDate(due.getDate() + intervalDays);
+
+  return {
+    repetitions,
+    ease,
+    interval_days: intervalDays,
+    due_at: formatLocalDateTime(due),
+    status: repetitions >= 3 ? 'mastered' : 'learning',
+  };
+}
+
+/** 从可选来源中补齐单词的音标与中译（优先复用 word_info 缓存） */
+async function resolveWordInfo(word: string): Promise<{ phonetic: string; translation: string }> {
+  const lowerWord = word.toLowerCase();
+  const cached = dbQueryAll('SELECT phonetic, translation FROM word_info WHERE word = ?', [lowerWord])[0];
+  const cachedPhonetic = cached?.phonetic ?? '';
+  const cachedTranslation = cached?.translation ?? '';
+
+  // 缓存音标必须合法且已规范化（排除带 "(r)" 的旧数据）
+  const cachedPhoneticUsable =
+    !!cachedPhonetic &&
+    isValidPhonetic(cachedPhonetic) &&
+    normalizePhonetic(cachedPhonetic) === cachedPhonetic;
+  const cachedTranslationUsable = !!cachedTranslation && hasChinese(cachedTranslation);
+
+  if (cachedPhoneticUsable && cachedTranslationUsable) {
+    return {
+      phonetic: cachedPhonetic,
+      translation: simplifyTranslation(cachedTranslation) || cachedTranslation,
+    };
+  }
+
+  const info = await getWordInfo(lowerWord);
+  const phonetic =
+    (cachedPhoneticUsable ? cachedPhonetic : info.phonetic) ||
+    normalizePhonetic(cachedPhonetic) ||
+    '';
+  const translation =
+    (cachedTranslationUsable
+      ? simplifyTranslation(cachedTranslation) || cachedTranslation
+      : info.translation) ||
+    simplifyTranslation(cachedTranslation) ||
+    cachedTranslation ||
+    '';
+
+  // 回写词典缓存（存规范化后的值），避免下次收录同一单词时重复请求第三方接口
+  if (phonetic || translation) {
+    dbRun(
+      `INSERT INTO word_info (word, phonetic, translation)
+       VALUES (?, ?, ?)
+       ON CONFLICT(word) DO UPDATE SET
+         phonetic = excluded.phonetic,
+         translation = excluded.translation,
+         updated_at = datetime('now', 'localtime')`,
+      [lowerWord, phonetic, translation]
+    );
+  }
+
+  return { phonetic, translation };
+}
+
+function parsePositiveInt(value: unknown, fallback: number, max: number): number {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
 }
 
 // 初始化数据库
@@ -216,17 +387,27 @@ async function fetchWithRetry(url: string, options: any = {}, retries = MAX_RETR
 
 // ── 音标工具函数 ──
 
-/** IPA 音标合法字符集（允许 /、[]、重音、次重音、连字符等） */
-const IPA_PATTERN = /^[\/\[\]]?[a-zɑæɒɔəɛɜɪʊʌɡŋʃʒðθʤʧˌˈː\.\- ]+[\/\[\]]?$/i;
+/**
+ * IPA 合法字符集。
+ * 除常见音标外，额外允许 ɹ/ɾ/ɻ（r 的变体）、成音节辅音 l̩/n̩（组合变音符 U+0300-U+036F）、
+ * ʰ/ʲ 等附加符号，避免合法音标被误判丢弃。
+ */
+const IPA_CHARS =
+  /^[a-zA-Zɑæɒɔəɛɜɪʊʌɐɘɵɤɯɰʉɨʏɚɝɞɡŋʃʒðθɹɾɻɭɲɳɴʂʐɕʑçʝɣʁʕʔɦʋɱɶʎʍɥʜʢʡʤʧʰʷʲˠˤⁿˡˌˈː.\-‑‿'()\[\]\/\s̀-ͯ]+$/;
 
-/** 清洗音标格式：统一用 / / 包裹，去除 [] 和多余空格 */
+const VOWEL_OR_LETTER = /[a-zA-Zɑæɒɔəɛɜɪʊʌɐɘɵɤɯɰʉɨʏɚɝ]/;
+
+/** 清洗音标格式：去掉可省略音括号，统一用 / / 包裹 */
 function normalizePhonetic(raw: string): string {
   if (!raw || typeof raw !== 'string') return '';
   let cleaned = raw.trim();
+  // ə(r) 这类括号表示可省略音，对中小学生显示时直接去掉
+  cleaned = cleaned.replace(/[（(][^）)]*[）)]/g, '');
   // 去掉首尾的方括号或斜杠，再统一加 /
   cleaned = cleaned.replace(/^[\[\/]+|[\]\/]+$/g, '').trim();
-  cleaned = cleaned.replace(/\s+/g, ' ');
-  if (!cleaned) return '';
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  // FreeDict 偶尔返回 "-mɪnt" 这种残缺音标，不能当成完整音标
+  if (!cleaned || cleaned.startsWith('-') || cleaned.endsWith('-')) return '';
   return `/${cleaned}/`;
 }
 
@@ -235,11 +416,13 @@ function isValidPhonetic(raw: string): boolean {
   if (!raw || typeof raw !== 'string') return false;
   const stripped = raw.replace(/^[\[\/]+|[\]\/]+$/g, '').trim();
   if (stripped.length < 2) return false;
-  // 必须包含至少一个 IPA 特征字符（含普通字母）
-  if (!IPA_PATTERN.test(raw)) return false;
-  // 如果全是普通字母没有 IPA 特殊符号，至少长度够长才接受
-  if (/^[a-zA-Z\s]+$/.test(stripped) && stripped.length < 4) return false;
-  return true;
+  // 音标里不应出现汉字、数字或全角标点
+  if (/[一-龥0-9]/.test(stripped)) return false;
+  // 至少要有一个元音/字母，排除纯符号噪声
+  if (!VOWEL_OR_LETTER.test(stripped)) return false;
+  // 残缺音标（如 FreeDict 的 "-mɪnt"）视为无效，触发其他数据源补全
+  if (stripped.startsWith('-') || stripped.endsWith('-')) return false;
+  return IPA_CHARS.test(stripped);
 }
 
 // ── 音标数据源 ──
@@ -309,15 +492,20 @@ async function fetchFromYoudao(word: string): Promise<{ phonetic: string; transl
     let phonetic = '';
     let translation = '';
 
-    // 音标：优先英式 → 美式
-    if (data.symbol) {
+    // 音标：有道实际把音标放在 ec.word[0].ukphone / usphone，symbol.ph_en 多数情况为空
+    const ecWord = data.ec?.word?.[0];
+    if (ecWord?.ukphone) phonetic = normalizePhonetic(ecWord.ukphone);
+    else if (ecWord?.usphone) phonetic = normalizePhonetic(ecWord.usphone);
+
+    // 兼容旧版返回结构
+    if (!phonetic && data.symbol) {
       if (data.symbol.ph_en) phonetic = normalizePhonetic(data.symbol.ph_en);
       else if (data.symbol.ph_am) phonetic = normalizePhonetic(data.symbol.ph_am);
     }
 
     // 中译
-    if (data.ec?.word?.[0]?.trs) {
-      const texts = extractTrsTexts(data.ec.word[0].trs);
+    if (ecWord?.trs) {
+      const texts = extractTrsTexts(ecWord.trs);
       if (texts.length > 0) translation = texts.join('；');
     }
     if (!translation && data.fanyi?.tran) {
@@ -408,13 +596,71 @@ function hasChinese(text: string): boolean {
   return /[\u4e00-\u9fa5\u3000-\u303F\uFF00-\uFFEF\u3400-\u4DBF]/.test(text);
 }
 
-/** 获取中译：百度 → 有道 */
+/**
+ * 把词典返回的长释义压缩成适合中小学生的 1~2 个核心义项。
+ * 例：ability 的 "n. 能力，能够；才能，技能，本领" → "能力；才能"
+ */
+function simplifyTranslation(raw: string): string {
+  if (!raw) return "";
+  let text = raw.trim();
+
+  // 去掉词性前缀（n. / v. / adj. 等，可能连续出现）
+  text = text.replace(/^(?:(?:n|v|vt|vi|adj|adv|prep|pron|conj|num|art|int|aux|abbr)\.\s*)+/i, "");
+  // 去掉括号补充说明，如（某事）、(尤指)
+  text = text.replace(/[（(][^）)]*[）)]/g, "");
+
+  const senses: string[] = [];
+  const hasHan = (value: string) => /[一-龥]/.test(value);
+  const isExplanatory = (value: string) =>
+    /^(指|表示|意思是|用于|形容|例如|即)/.test(value) || [...value].length > 12;
+
+  const pushSense = (value: string) => {
+    const sense = value
+      .split(/[：:]/)[0]
+      .trim()
+      .replace(/^[.\s]+|[.\s]+$/g, "");
+    if (!sense || !hasHan(sense) || isExplanatory(sense) || senses.includes(sense)) return;
+    senses.push(sense);
+  };
+
+  const groups = text.split(/[；;]/).map((item) => item.trim()).filter(Boolean);
+
+  if (groups.length <= 1) {
+    // 只有一组时（如 "回想，记得，记起…"），取前两个小义项
+    for (const part of (groups[0] ?? "").split(/[，,、]/)) {
+      pushSense(part);
+      if (senses.length >= 2) break;
+    }
+  } else {
+    // 多个大义项时，每个大义项只取第一个核心词
+    for (const group of groups) {
+      pushSense(group.split(/[，,、]/)[0]);
+      if (senses.length >= 2) break;
+    }
+  }
+
+  if (senses.length === 0) {
+    const fallback = text.split(/[；;，,、：:]/)[0].trim();
+    return fallback && hasHan(fallback) ? [...fallback].slice(0, 16).join("") : "";
+  }
+
+  return senses.join("；");
+}
+
+/** 获取中译：百度 → 有道，并统一压缩为适合中小学生的释义 */
 async function fetchTranslation(word: string): Promise<string> {
   const baiduTrans = await translateWithBaidu(word);
-  if (baiduTrans && hasChinese(baiduTrans)) return baiduTrans;
+  if (baiduTrans && hasChinese(baiduTrans)) {
+    return simplifyTranslation(baiduTrans) || [...baiduTrans].slice(0, 20).join("");
+  }
 
   const youdaoResult = await fetchFromYoudao(word);
-  if (youdaoResult.translation && hasChinese(youdaoResult.translation)) return youdaoResult.translation;
+  if (youdaoResult.translation && hasChinese(youdaoResult.translation)) {
+    return (
+      simplifyTranslation(youdaoResult.translation) ||
+      [...youdaoResult.translation].slice(0, 20).join("")
+    );
+  }
 
   return '';
 }
@@ -590,7 +836,12 @@ async function getWordInfo(word: string): Promise<{ phonetic: string; translatio
 
   // 1. 硬编码词典（最快路径）
   if (wordDictionary[lowerWord]) {
-    return wordDictionary[lowerWord];
+    const entry = wordDictionary[lowerWord];
+    return {
+      // 硬编码词表里大量英式 "(r)" 写法，统一按 normalize 规则清洗
+      phonetic: normalizePhonetic(entry.phonetic) || entry.phonetic,
+      translation: simplifyTranslation(entry.translation) || entry.translation,
+    };
   }
 
   const isPhrase = word.includes(' ');
@@ -623,6 +874,14 @@ async function getWordInfo(word: string): Promise<{ phonetic: string; translatio
       if (wordDictionary[lowerW]) {
         const clean = wordDictionary[lowerW].phonetic.replace(/[\/\[\]()]/g, '').trim();
         if (clean) return clean;
+      }
+      // 其次查 word_info 缓存，避免对同一组成词反复请求网络
+      const cachedPhonetic = dbQueryAll(
+        'SELECT phonetic FROM word_info WHERE word = ?',
+        [lowerW]
+      )[0]?.phonetic;
+      if (cachedPhonetic && isValidPhonetic(cachedPhonetic)) {
+        return cachedPhonetic.replace(/[\/\[\]]/g, '').trim();
       }
       const result = await fetchPhoneticParallel(w);
       if (result.phonetic) {
@@ -678,8 +937,9 @@ app.get('/api/words', async (req, res) => {
       let phonetic = dbResult?.phonetic || '';
       let translation = dbResult?.translation || '';
 
-      // 数据库音标也需要校验：如果存了脏数据，触发重新查询
-      const dbPhoneticValid = phonetic && isValidPhonetic(phonetic);
+      // 数据库音标也需要校验：如果存了脏数据（含 "(r)" 等），触发重新查询
+      const dbPhoneticValid =
+        phonetic && isValidPhonetic(phonetic) && normalizePhonetic(phonetic) === phonetic;
       const dbTranslationValid = translation && hasChinese(translation);
 
       if (!dbPhoneticValid || !dbTranslationValid) {
@@ -703,7 +963,12 @@ app.get('/api/words', async (req, res) => {
         }
       }
 
-      results.push({ word, phonetic, translation });
+      // 旧缓存里是完整词典释义，返回前统一压缩，保证老数据立即变短
+      results.push({
+        word,
+        phonetic: normalizePhonetic(phonetic) || phonetic,
+        translation: simplifyTranslation(translation) || translation,
+      });
     }
 
     res.json(results);
@@ -735,11 +1000,12 @@ app.post('/api/words', async (req, res) => {
 
 app.post('/api/recognition', async (req, res) => {
   try {
-    const { imageName, imageSize, words, status, errorMessage } = req.body;
+    const { imageName, imageSize, status, errorMessage } = req.body;
+    const words = Array.isArray(req.body?.words) ? req.body.words : [];
 
     dbRun(
       'INSERT INTO recognition_record (image_name, image_size, recognized_words, status, error_message) VALUES (?, ?, ?, ?, ?)',
-      [imageName, imageSize, JSON.stringify(words), status, errorMessage || '']
+      [imageName || '', imageSize || 0, JSON.stringify(words), status || 'success', errorMessage || '']
     );
 
     const recordId = dbLastInsertId();
@@ -752,6 +1018,507 @@ app.post('/api/recognition', async (req, res) => {
   } catch (error) {
     console.error('Error saving recognition:', error);
     res.status(500).json({ error: 'Failed to save recognition' });
+  }
+});
+
+// ── 生词本 ──
+
+/** 生词本全部单词（用于识别结果标记「已收录」） */
+app.get('/api/wordbook/words', (_req, res) => {
+  try {
+    const rows = dbQueryAll('SELECT word FROM wordbook');
+    res.json(rows.map((r: any) => r.word));
+  } catch (error) {
+    console.error('Error listing wordbook words:', error);
+    res.status(500).json({ error: '获取生词本单词失败' });
+  }
+});
+
+app.get('/api/wordbook', (req, res) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const pageSize = parsePositiveInt(req.query.pageSize, 20, 200);
+    const q = String(req.query.q ?? '').trim();
+    const status = String(req.query.status ?? '').trim();
+
+    const where: string[] = [];
+    const params: any[] = [];
+    if (q) {
+      where.push('(word LIKE ? OR translation LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`);
+    }
+    if (status === 'learning' || status === 'mastered') {
+      where.push('status = ?');
+      params.push(status);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const totalRow = dbQueryAll(`SELECT COUNT(*) AS total FROM wordbook ${whereSql}`, params)[0];
+    const items = dbQueryAll(
+      `SELECT * FROM wordbook ${whereSql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, (page - 1) * pageSize]
+    );
+
+    // 历史数据可能存了 "(r)" 音标或长释义，返回时统一清洗
+    const cleanedItems = items.map((item: any) => ({
+      ...item,
+      phonetic: normalizePhonetic(item.phonetic) || item.phonetic,
+      translation: simplifyTranslation(item.translation) || item.translation,
+    }));
+
+    res.json({ items: cleanedItems, total: totalRow?.total ?? 0, page, pageSize });
+  } catch (error) {
+    console.error('Error listing wordbook:', error);
+    res.status(500).json({ error: '获取生词本失败' });
+  }
+});
+
+app.post('/api/wordbook', async (req, res) => {
+  try {
+    const payload = req.body;
+    const rawItems: any[] = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.words)
+        ? payload.words
+        : payload?.word
+          ? [payload]
+          : [];
+
+    const defaultSource = typeof payload?.source === 'string' ? payload.source : 'manual';
+    const normalized: { word: string; phonetic: string; translation: string; source: string }[] = [];
+    const seen = new Set<string>();
+
+    for (const raw of rawItems) {
+      const item = typeof raw === 'string' ? { word: raw } : raw;
+      const word = String(item?.word ?? '').trim();
+      if (!word || word.length > 100) continue;
+      const key = word.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const rawPhonetic = String(item?.phonetic ?? '').trim();
+      const rawTranslation = String(item?.translation ?? '').trim();
+      normalized.push({
+        word: key,
+        phonetic: normalizePhonetic(rawPhonetic) || rawPhonetic,
+        translation: simplifyTranslation(rawTranslation) || rawTranslation,
+        source: String(item?.source ?? defaultSource).slice(0, 20),
+      });
+    }
+
+    if (normalized.length === 0) {
+      return res.status(400).json({ error: '没有可收录的单词' });
+    }
+
+    const existingRows = normalized.length > 0
+      ? dbQueryAll(
+          `SELECT word FROM wordbook WHERE word IN (${normalized.map(() => '?').join(',')})`,
+          normalized.map((n) => n.word)
+        )
+      : [];
+    const existing = new Set(existingRows.map((r: any) => r.word));
+
+    const toAdd = normalized.filter((n) => !existing.has(n.word));
+
+    const resolved = await mapLimit(toAdd, 5, async (item) => {
+      if (item.phonetic && item.translation) return item;
+      const info = await resolveWordInfo(item.word);
+      return {
+        ...item,
+        phonetic: item.phonetic || info.phonetic,
+        translation: item.translation || info.translation,
+      };
+    });
+
+    const statements: { sql: string; params: any[] }[] = [];
+    for (const item of resolved) {
+      statements.push({
+        sql: `INSERT INTO wordbook (word, phonetic, translation, source, due_at)
+              VALUES (?, ?, ?, ?, datetime('now', 'localtime'))
+              ON CONFLICT(word) DO NOTHING`,
+        params: [item.word, item.phonetic, item.translation, item.source],
+      });
+      statements.push({
+        sql: `INSERT INTO study_record (word, action) VALUES (?, 'add')`,
+        params: [item.word],
+      });
+    }
+    dbRunBatch(statements);
+
+    const addedWords = resolved.map((r) => r.word);
+    const items = addedWords.length > 0
+      ? dbQueryAll(
+          `SELECT * FROM wordbook WHERE word IN (${addedWords.map(() => '?').join(',')})`,
+          addedWords
+        )
+      : [];
+
+    res.json({
+      success: true,
+      added: items.length,
+      skipped: normalized.length - toAdd.length,
+      items,
+    });
+  } catch (error) {
+    console.error('Error adding to wordbook:', error);
+    res.status(500).json({ error: '收录到生词本失败' });
+  }
+});
+
+app.patch('/api/wordbook/:id', (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: '无效的 ID' });
+
+    const row = dbQueryAll('SELECT * FROM wordbook WHERE id = ?', [id])[0];
+    if (!row) return res.status(404).json({ error: '单词不存在' });
+
+    const sets: string[] = [];
+    const params: any[] = [];
+
+    if (typeof req.body?.phonetic === 'string') {
+      sets.push('phonetic = ?');
+      params.push(req.body.phonetic.trim());
+    }
+    if (typeof req.body?.translation === 'string') {
+      sets.push('translation = ?');
+      params.push(req.body.translation.trim());
+    }
+    if (req.body?.status === 'learning' || req.body?.status === 'mastered') {
+      sets.push('status = ?');
+      params.push(req.body.status);
+    }
+    if (sets.length === 0) {
+      return res.status(400).json({ error: '没有可更新的字段' });
+    }
+
+    sets.push("updated_at = datetime('now', 'localtime')");
+    dbRun(`UPDATE wordbook SET ${sets.join(', ')} WHERE id = ?`, [...params, id]);
+    const updated = dbQueryAll('SELECT * FROM wordbook WHERE id = ?', [id])[0];
+    res.json({ success: true, item: updated });
+  } catch (error) {
+    console.error('Error updating wordbook item:', error);
+    res.status(500).json({ error: '更新单词失败' });
+  }
+});
+
+app.delete('/api/wordbook/:id', (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: '无效的 ID' });
+    dbRun('DELETE FROM wordbook WHERE id = ?', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting wordbook item:', error);
+    res.status(500).json({ error: '删除单词失败' });
+  }
+});
+
+app.post('/api/wordbook/batch-delete', (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((v: any) => Number.parseInt(String(v), 10)).filter(Number.isFinite)
+      : [];
+    if (ids.length === 0) return res.status(400).json({ error: '缺少要删除的 ID' });
+
+    dbRun(`DELETE FROM wordbook WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+    res.json({ success: true, deleted: ids.length });
+  } catch (error) {
+    console.error('Error batch deleting wordbook items:', error);
+    res.status(500).json({ error: '批量删除失败' });
+  }
+});
+
+// ── 复习（间隔重复） ──
+
+app.get('/api/review/queue', (req, res) => {
+  try {
+    const limit = parsePositiveInt(req.query.limit, 20, 100);
+    const items = dbQueryAll(
+      `SELECT * FROM wordbook
+       WHERE due_at IS NULL OR due_at <= datetime('now', 'localtime')
+       ORDER BY due_at ASC, id ASC
+       LIMIT ?`,
+      [limit]
+    );
+    const dueCount = dbQueryAll(
+      `SELECT COUNT(*) AS c FROM wordbook WHERE due_at IS NULL OR due_at <= datetime('now', 'localtime')`
+    )[0]?.c ?? 0;
+    const totalCount = dbQueryAll('SELECT COUNT(*) AS c FROM wordbook')[0]?.c ?? 0;
+    res.json({ items, dueCount, totalCount });
+  } catch (error) {
+    console.error('Error fetching review queue:', error);
+    res.status(500).json({ error: '获取复习队列失败' });
+  }
+});
+
+app.post('/api/review/:id', (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    const quality = Number(req.body?.quality);
+    if (!Number.isFinite(id) || ![0, 1, 2].includes(quality)) {
+      return res.status(400).json({ error: '参数无效' });
+    }
+
+    const row = dbQueryAll('SELECT * FROM wordbook WHERE id = ?', [id])[0];
+    if (!row) return res.status(404).json({ error: '单词不存在' });
+
+    const next = scheduleNextReview(row, quality as ReviewQuality);
+    const actionMap = ['review_forgot', 'review_fuzzy', 'review_known'];
+    const isCorrect = quality === 2 ? 1 : 0;
+
+    dbRunBatch([
+      {
+        sql: `UPDATE wordbook SET
+                repetitions = ?, ease = ?, interval_days = ?, due_at = ?, status = ?,
+                last_review_at = datetime('now', 'localtime'),
+                review_count = review_count + 1,
+                correct_count = correct_count + ?,
+                wrong_count = wrong_count + ?,
+                updated_at = datetime('now', 'localtime')
+              WHERE id = ?`,
+        params: [
+          next.repetitions,
+          next.ease,
+          next.interval_days,
+          next.due_at,
+          next.status,
+          isCorrect,
+          isCorrect ? 0 : 1,
+          id,
+        ],
+      },
+      {
+        sql: 'INSERT INTO study_record (word, action, quality) VALUES (?, ?, ?)',
+        params: [row.word, actionMap[quality as ReviewQuality], quality],
+      },
+    ]);
+
+    res.json({ success: true, next });
+  } catch (error) {
+    console.error('Error submitting review:', error);
+    res.status(500).json({ error: '提交复习结果失败' });
+  }
+});
+
+// ── 测验 ──
+
+function shuffle<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+app.get('/api/quiz', (req, res) => {
+  try {
+    const limit = parsePositiveInt(req.query.limit, 10, 30);
+    const pool = dbQueryAll(
+      `SELECT id, word, phonetic, translation FROM wordbook
+       WHERE translation IS NOT NULL AND translation != ''`
+    );
+
+    if (pool.length < 4) {
+      return res.json({
+        questions: [],
+        message: '生词本至少需要 4 个带释义的单词才能开始测验',
+      });
+    }
+
+    const picked = shuffle(pool).slice(0, Math.min(limit, pool.length));
+    const questions = picked.map((row: any) => {
+      const type = Math.random() < 0.5 ? 'en2zh' : 'zh2en';
+      const prompt = type === 'en2zh' ? row.word : row.translation;
+      const answer = type === 'en2zh' ? row.translation : row.word;
+
+      const distractorPool = shuffle(
+        pool.filter((p: any) => {
+          const value = type === 'en2zh' ? p.translation : p.word;
+          return value !== answer;
+        })
+      );
+      const distractors: string[] = [];
+      for (const candidate of distractorPool) {
+        const value = type === 'en2zh' ? candidate.translation : candidate.word;
+        if (!distractors.includes(value)) distractors.push(value);
+        if (distractors.length >= 3) break;
+      }
+
+      return {
+        id: row.id,
+        word: row.word,
+        phonetic: row.phonetic,
+        translation: row.translation,
+        type,
+        prompt,
+        answer,
+        options: shuffle([answer, ...distractors]),
+      };
+    });
+
+    res.json({ questions });
+  } catch (error) {
+    console.error('Error generating quiz:', error);
+    res.status(500).json({ error: '生成测验失败' });
+  }
+});
+
+app.post('/api/quiz/result', (req, res) => {
+  try {
+    const results = Array.isArray(req.body?.results) ? req.body.results : [];
+    if (results.length === 0) return res.status(400).json({ error: '缺少测验结果' });
+
+    const statements: { sql: string; params: any[] }[] = [];
+    for (const item of results) {
+      const id = Number.parseInt(String(item?.id), 10);
+      if (!Number.isFinite(id)) continue;
+      const row = dbQueryAll('SELECT * FROM wordbook WHERE id = ?', [id])[0];
+      if (!row) continue;
+
+      const correct = Boolean(item?.correct);
+      statements.push({
+        sql: 'INSERT INTO study_record (word, action) VALUES (?, ?)',
+        params: [row.word, correct ? 'quiz_correct' : 'quiz_wrong'],
+      });
+
+      if (correct) {
+        statements.push({
+          sql: `UPDATE wordbook SET
+                  review_count = review_count + 1,
+                  correct_count = correct_count + 1,
+                  last_review_at = datetime('now', 'localtime')
+                WHERE id = ?`,
+          params: [id],
+        });
+      } else {
+        statements.push({
+          sql: `UPDATE wordbook SET
+                  review_count = review_count + 1,
+                  wrong_count = wrong_count + 1,
+                  status = 'learning',
+                  due_at = datetime('now', 'localtime'),
+                  last_review_at = datetime('now', 'localtime')
+                WHERE id = ?`,
+          params: [id],
+        });
+      }
+    }
+
+    dbRunBatch(statements);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error saving quiz result:', error);
+    res.status(500).json({ error: '保存测验结果失败' });
+  }
+});
+
+// ── 学习统计 ──
+
+app.get('/api/stats', (_req, res) => {
+  try {
+    const wordbookRow = dbQueryAll(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'mastered' THEN 1 ELSE 0 END) AS mastered
+       FROM wordbook`
+    )[0] ?? { total: 0, mastered: 0 };
+
+    const dueCount = dbQueryAll(
+      `SELECT COUNT(*) AS c FROM wordbook WHERE due_at IS NULL OR due_at <= datetime('now', 'localtime')`
+    )[0]?.c ?? 0;
+
+    const todayStudied = dbQueryAll(
+      `SELECT COUNT(DISTINCT word) AS c FROM study_record
+       WHERE action != 'add' AND date(created_at) = date('now', 'localtime')`
+    )[0]?.c ?? 0;
+
+    const todayAdded = dbQueryAll(
+      `SELECT COUNT(*) AS c FROM study_record
+       WHERE action = 'add' AND date(created_at) = date('now', 'localtime')`
+    )[0]?.c ?? 0;
+
+    const practiceRow = dbQueryAll(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN action IN ('review_known', 'quiz_correct') THEN 1 ELSE 0 END) AS correct
+       FROM study_record
+       WHERE action LIKE 'review_%' OR action LIKE 'quiz_%'`
+    )[0] ?? { total: 0, correct: 0 };
+
+    const totalAdded = dbQueryAll(
+      `SELECT COUNT(*) AS c FROM study_record WHERE action = 'add'`
+    )[0]?.c ?? 0;
+
+    const activityRows = dbQueryAll(
+      `SELECT date(created_at) AS d, COUNT(DISTINCT word) AS c
+       FROM study_record
+       WHERE action != 'add' AND date(created_at) >= date('now', 'localtime', '-13 days')
+       GROUP BY d`
+    );
+    const activityMap = new Map<string, number>(activityRows.map((r: any) => [r.d, r.c]));
+
+    const last14Days: { date: string; count: number }[] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = formatLocalDateOnly(d);
+      last14Days.push({ date: key, count: activityMap.get(key) ?? 0 });
+    }
+
+    // 连续学习天数：今天没有记录时从昨天开始回看
+    const activeDates = new Set<string>(
+      dbQueryAll('SELECT DISTINCT date(created_at) AS d FROM study_record WHERE action != \'add\'').map(
+        (r: any) => r.d
+      )
+    );
+    let streakDays = 0;
+    const cursor = new Date();
+    if (!activeDates.has(formatLocalDateOnly(cursor))) {
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    while (activeDates.has(formatLocalDateOnly(cursor))) {
+      streakDays++;
+      cursor.setDate(cursor.getDate() - 1);
+    }
+
+    const topWrongWords = dbQueryAll(
+      `SELECT word, phonetic, translation, wrong_count
+       FROM wordbook
+       WHERE wrong_count > 0
+       ORDER BY wrong_count DESC, updated_at DESC
+       LIMIT 10`
+    );
+
+    const recentRecords = dbQueryAll(
+      `SELECT word, action, quality, created_at
+       FROM study_record
+       ORDER BY id DESC
+       LIMIT 20`
+    );
+
+    const practiceTotal = Number(practiceRow.total) || 0;
+    const practiceCorrect = Number(practiceRow.correct) || 0;
+    const wordbookTotal = Number(wordbookRow.total) || 0;
+    const masteredCount = Number(wordbookRow.mastered) || 0;
+
+    res.json({
+      wordbookTotal,
+      masteredCount,
+      learningCount: wordbookTotal - masteredCount,
+      dueCount,
+      todayStudied,
+      todayAdded,
+      totalAdded,
+      practiceTotal,
+      accuracy: practiceTotal > 0 ? practiceCorrect / practiceTotal : 0,
+      masteryRate: wordbookTotal > 0 ? masteredCount / wordbookTotal : 0,
+      streakDays,
+      last14Days,
+      topWrongWords,
+      recentRecords,
+    });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: '获取学习统计失败' });
   }
 });
 
