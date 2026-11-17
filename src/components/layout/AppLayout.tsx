@@ -1,11 +1,12 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
-import { BarChart3, BookOpen, ListChecks, ScanLine, Sparkles } from "lucide-react";
+import { BarChart3, BookOpen, History, ListChecks, ScanLine, Sparkles } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { to: "/", label: "单词识别", icon: ScanLine, end: true },
+  { to: "/history", label: "识别历史", icon: History, end: false },
   { to: "/wordbook", label: "生词本", icon: BookOpen, end: false },
   { to: "/review", label: "复习", icon: Sparkles, end: false },
   { to: "/quiz", label: "测验", icon: ListChecks, end: false },

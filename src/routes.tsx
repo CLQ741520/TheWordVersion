@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import WordOcrPage from "./pages/WordOcrPage";
+import HistoryPage from "./pages/HistoryPage";
 import WordbookPage from "./pages/WordbookPage";
 import ReviewPage from "./pages/ReviewPage";
 import QuizPage from "./pages/QuizPage";
@@ -20,6 +21,12 @@ export const routes: RouteConfig[] = [
     name: "单词图片识别",
     path: "/",
     element: <WordOcrPage />,
+    public: true,
+  },
+  {
+    name: "识别历史",
+    path: "/history",
+    element: <HistoryPage />,
     public: true,
   },
   {
