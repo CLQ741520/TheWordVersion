@@ -35,5 +35,6 @@ history/*.json
 /tasks
 .rules
 
-# SQLite 数据库文件
+# SQLite 数据库文件与备份
 data/*.db
+data/*.db.bak-*
