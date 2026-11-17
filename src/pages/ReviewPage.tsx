@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Check, Eye, Loader2, RotateCcw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -7,8 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { formatDueLabel } from "@/lib/date";
 import { fetchReviewQueue, submitReview } from "@/services/studyService";
-import type { ReviewQuality, WordbookItem } from "@/types/study";
+import type { ReviewNextState, ReviewQuality, ReviewQueueMode, WordbookItem } from "@/types/study";
 
 interface Tally {
   known: number;
@@ -16,9 +17,16 @@ interface Tally {
   forgot: number;
 }
 
+interface LastFeedback {
+  word: string;
+  next: ReviewNextState;
+}
+
 const EMPTY_TALLY: Tally = { known: 0, fuzzy: 0, forgot: 0 };
 
 export default function ReviewPage() {
+  const [searchParams] = useSearchParams();
+  const mode: ReviewQueueMode = searchParams.get("mode") === "wrong" ? "wrong" : "due";
   const [loading, setLoading] = useState(true);
   const [queue, setQueue] = useState<WordbookItem[]>([]);
   const [dueCount, setDueCount] = useState(0);
@@ -27,23 +35,25 @@ export default function ReviewPage() {
   const [revealed, setRevealed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [tally, setTally] = useState<Tally>(EMPTY_TALLY);
+  const [lastFeedback, setLastFeedback] = useState<LastFeedback | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await fetchReviewQueue(50);
+      const result = await fetchReviewQueue(50, mode);
       setQueue(result.items);
       setDueCount(result.dueCount);
       setTotalCount(result.totalCount);
       setIndex(0);
       setRevealed(false);
       setTally(EMPTY_TALLY);
+      setLastFeedback(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "获取复习队列失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     void load();
@@ -57,7 +67,8 @@ export default function ReviewPage() {
       if (!current || submitting) return;
       setSubmitting(true);
       try {
-        await submitReview(current.id, quality);
+        const next = await submitReview(current.id, quality);
+        setLastFeedback({ word: current.word, next });
         setTally((prev) => ({
           known: prev.known + (quality === 2 ? 1 : 0),
           fuzzy: prev.fuzzy + (quality === 1 ? 1 : 0),
@@ -109,19 +120,23 @@ export default function ReviewPage() {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
               <Check className="h-6 w-6 text-emerald-600" />
             </div>
-            <h1 className="mt-4 text-lg font-semibold">暂无到期单词</h1>
+            <h1 className="mt-4 text-lg font-semibold">
+              {mode === "wrong" ? "暂无错词" : "暂无到期单词"}
+            </h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              {totalCount === 0
-                ? "生词本还是空的，先去识别页面收录一些单词吧。"
-                : "所有单词都在计划中，等下次到期后再来复习即可。"}
+              {mode === "wrong"
+                ? "先去做一组测验，答错的单词会自动进入这里。"
+                : totalCount === 0
+                  ? "生词本还是空的，先去识别页面收录一些单词吧。"
+                  : "所有单词都在计划中，等下次到期后再来复习即可。"}
             </p>
             <div className="mt-6 flex gap-2">
               <Button asChild variant="outline">
                 <Link to="/wordbook">查看生词本</Link>
               </Button>
               <Button asChild>
-                <Link to={totalCount === 0 ? "/" : "/quiz"}>
-                  {totalCount === 0 ? "去识别单词" : "去测验"}
+                <Link to={totalCount === 0 && mode === "due" ? "/" : "/quiz"}>
+                  {totalCount === 0 && mode === "due" ? "去识别单词" : "去测验"}
                 </Link>
               </Button>
             </div>
@@ -183,15 +198,32 @@ export default function ReviewPage() {
     <div className="mx-auto max-w-2xl px-4 py-8">
       <header className="mb-4 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">复习</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {mode === "wrong" ? "错词专项复习" : "复习"}
+          </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            待复习 {dueCount} 个 · 本轮 {Math.min(index + 1, queue.length)} / {queue.length}
+            {mode === "wrong" ? "错词" : "待复习"} {dueCount} 个 · 本轮{" "}
+            {Math.min(index + 1, queue.length)} / {queue.length}
           </p>
         </div>
-        <Badge variant="secondary">间隔重复</Badge>
+        <Badge variant={mode === "wrong" ? "destructive" : "secondary"}>
+          {mode === "wrong" ? "错词强化" : "间隔重复"}
+        </Badge>
       </header>
 
       <Progress value={progress} className="mb-6" />
+
+      {lastFeedback && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-2.5 text-sm text-emerald-800">
+          <span>
+            「{lastFeedback.word}」下次复习：{formatDueLabel(lastFeedback.next.due_at).text}
+          </span>
+          <span className="text-xs text-emerald-700/80">
+            间隔 {lastFeedback.next.interval_days} 天 ·{" "}
+            {lastFeedback.next.status === "mastered" ? "已掌握" : "学习中"}
+          </span>
+        </div>
+      )}
 
       <Card>
         <CardContent className="px-6 py-12">
