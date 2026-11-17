@@ -6,12 +6,14 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { fetchQuiz, submitQuizResult } from "@/services/studyService";
 import type { QuizQuestion } from "@/types/study";
 import { cn } from "@/lib/utils";
 
 type Phase = "idle" | "playing" | "result";
+type QuizMode = "choice" | "spelling";
 
 interface Answer {
   id: number;
@@ -20,12 +22,19 @@ interface Answer {
 
 const QUIZ_SIZE = 10;
 
+function normalizeAnswer(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 export default function QuizPage() {
   const [phase, setPhase] = useState<Phase>("idle");
+  const [quizMode, setQuizMode] = useState<QuizMode>("choice");
   const [loading, setLoading] = useState(false);
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [spellingInput, setSpellingInput] = useState("");
+  const [composing, setComposing] = useState(false);
   const [answers, setAnswers] = useState<Answer[]>([]);
   const [emptyMessage, setEmptyMessage] = useState("");
 
@@ -33,7 +42,7 @@ export default function QuizPage() {
     setLoading(true);
     setEmptyMessage("");
     try {
-      const result = await fetchQuiz(QUIZ_SIZE);
+      const result = await fetchQuiz(QUIZ_SIZE, quizMode);
       if (result.questions.length === 0) {
         setEmptyMessage(result.message || "暂时无法生成测验");
         setPhase("idle");
@@ -42,6 +51,7 @@ export default function QuizPage() {
       setQuestions(result.questions);
       setIndex(0);
       setSelected(null);
+      setSpellingInput("");
       setAnswers([]);
       setPhase("playing");
     } catch (error) {
@@ -49,7 +59,7 @@ export default function QuizPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [quizMode]);
 
   const current = phase === "playing" ? questions[index] : null;
 
@@ -59,11 +69,19 @@ export default function QuizPage() {
     setAnswers((prev) => [...prev, { id: current.id, correct: option === current.answer }]);
   };
 
+  const submitSpelling = () => {
+    if (!current || selected !== null || !spellingInput.trim()) return;
+    const correct = normalizeAnswer(spellingInput) === normalizeAnswer(current.answer);
+    setSelected(spellingInput);
+    setAnswers((prev) => [...prev, { id: current.id, correct }]);
+  };
+
   const next = async () => {
     if (!current) return;
     if (index + 1 < questions.length) {
       setIndex((i) => i + 1);
       setSelected(null);
+      setSpellingInput("");
       return;
     }
 
@@ -76,7 +94,7 @@ export default function QuizPage() {
   };
 
   useEffect(() => {
-    if (!current || selected !== null) return;
+    if (!current || selected !== null || current.type === "spelling") return;
     const handler = (event: KeyboardEvent) => {
       const position = Number.parseInt(event.key, 10);
       if (position >= 1 && position <= current.options.length) {
@@ -97,7 +115,28 @@ export default function QuizPage() {
             </div>
             <h1 className="mt-4 text-lg font-semibold">单词测验</h1>
             <p className="mt-1 max-w-md text-sm text-muted-foreground">
-              从生词本随机抽取最多 {QUIZ_SIZE} 个单词，混合英译中与中译英选择题。答错的单词会自动回到复习队列。
+              从生词本随机抽取最多 {QUIZ_SIZE} 个单词。答错的单词会自动回到复习队列。
+            </p>
+            <div className="mt-5 flex gap-2">
+              <Button
+                size="sm"
+                variant={quizMode === "choice" ? "default" : "outline"}
+                onClick={() => setQuizMode("choice")}
+              >
+                选择题
+              </Button>
+              <Button
+                size="sm"
+                variant={quizMode === "spelling" ? "default" : "outline"}
+                onClick={() => setQuizMode("spelling")}
+              >
+                拼写题
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {quizMode === "choice"
+                ? "英译中 / 中译英混排，适合快速复习。"
+                : "看中文写英文，检验拼写掌握程度。"}
             </p>
             {emptyMessage && <p className="mt-4 text-sm text-amber-700">{emptyMessage}</p>}
             <div className="mt-6 flex flex-col gap-2 sm:flex-row">
@@ -181,7 +220,7 @@ export default function QuizPage() {
                 再来一组
               </Button>
               <Button asChild className="flex-1">
-                <Link to="/review">去复习错题</Link>
+                <Link to="/review?mode=wrong">去复习错题</Link>
               </Button>
             </div>
           </CardContent>
@@ -193,7 +232,11 @@ export default function QuizPage() {
   if (!current) return null;
 
   const isAnswered = selected !== null;
-  const isCorrect = selected === current.answer;
+  const isCorrect =
+    selected !== null &&
+    (current.type === "spelling"
+      ? normalizeAnswer(selected) === normalizeAnswer(current.answer)
+      : selected === current.answer);
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-8">
@@ -204,7 +247,9 @@ export default function QuizPage() {
             第 {index + 1} / {questions.length} 题
           </p>
         </div>
-        <Badge variant="secondary">{current.type === "en2zh" ? "英译中" : "中译英"}</Badge>
+        <Badge variant="secondary">
+          {current.type === "spelling" ? "拼写" : current.type === "en2zh" ? "英译中" : "中译英"}
+        </Badge>
       </header>
 
       <Progress value={((index + (isAnswered ? 1 : 0)) / questions.length) * 100} className="mb-6" />
@@ -220,36 +265,71 @@ export default function QuizPage() {
             </p>
           )}
 
-          <div className="mt-8 grid gap-2">
-            {current.options.map((option, optionIndex) => {
-              const isPicked = selected === option;
-              const isAnswer = option === current.answer;
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => choose(option)}
-                  disabled={isAnswered}
-                  className={cn(
-                    "flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors",
-                    !isAnswered && "hover:bg-accent",
-                    isAnswered && isAnswer && "border-emerald-300 bg-emerald-50 text-emerald-800",
-                    isAnswered && isPicked && !isAnswer && "border-red-300 bg-red-50 text-red-800",
-                    isAnswered && !isPicked && !isAnswer && "opacity-60"
-                  )}
+          {current.type === "spelling" ? (
+            <div className="mt-8">
+              <Input
+                value={spellingInput}
+                onChange={(event) => setSpellingInput(event.target.value)}
+                onCompositionStart={() => setComposing(true)}
+                onCompositionEnd={() => setComposing(false)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !composing && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    submitSpelling();
+                  }
+                }}
+                placeholder="输入英文单词后按回车"
+                disabled={isAnswered}
+                autoFocus
+                className="text-center text-lg"
+              />
+              {current.hint && (
+                <p className="mt-2 text-center text-sm text-muted-foreground">
+                  提示：<span className="font-mono tracking-widest">{current.hint}</span>
+                </p>
+              )}
+              {!isAnswered && (
+                <Button
+                  className="mt-4 w-full"
+                  onClick={submitSpelling}
+                  disabled={!spellingInput.trim()}
                 >
-                  <span className="flex items-center gap-3">
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs">
-                      {optionIndex + 1}
+                  提交答案
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="mt-8 grid gap-2">
+              {current.options.map((option, optionIndex) => {
+                const isPicked = selected === option;
+                const isAnswer = option === current.answer;
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => choose(option)}
+                    disabled={isAnswered}
+                    className={cn(
+                      "flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors",
+                      !isAnswered && "hover:bg-accent",
+                      isAnswered && isAnswer && "border-emerald-300 bg-emerald-50 text-emerald-800",
+                      isAnswered && isPicked && !isAnswer && "border-red-300 bg-red-50 text-red-800",
+                      isAnswered && !isPicked && !isAnswer && "opacity-60"
+                    )}
+                  >
+                    <span className="flex items-center gap-3">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs">
+                        {optionIndex + 1}
+                      </span>
+                      {option}
                     </span>
-                    {option}
-                  </span>
-                  {isAnswered && isAnswer && <CheckCircle2 className="h-4 w-4 shrink-0" />}
-                  {isAnswered && isPicked && !isAnswer && <XCircle className="h-4 w-4 shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
+                    {isAnswered && isAnswer && <CheckCircle2 className="h-4 w-4 shrink-0" />}
+                    {isAnswered && isPicked && !isAnswer && <XCircle className="h-4 w-4 shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {isAnswered && (
             <div className="mt-6">
@@ -261,6 +341,11 @@ export default function QuizPage() {
               >
                 {isCorrect ? "回答正确" : `回答错误，正确答案：${current.answer}`}
               </p>
+              {current.type === "spelling" && (
+                <p className="mt-1 text-center text-sm text-muted-foreground">
+                  你的答案：{selected}
+                </p>
+              )}
               <Button className="mt-4 w-full" onClick={() => void next()}>
                 {index + 1 < questions.length ? "下一题" : "查看结果"}
               </Button>
@@ -269,7 +354,11 @@ export default function QuizPage() {
         </CardContent>
       </Card>
 
-      <p className="mt-4 text-center text-xs text-muted-foreground">按数字键 1-4 可以快速选择答案</p>
+      <p className="mt-4 text-center text-xs text-muted-foreground">
+        {current.type === "spelling"
+          ? "输入答案后按回车提交"
+          : "按数字键 1-4 可以快速选择答案"}
+      </p>
     </div>
   );
 }
